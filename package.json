@@ -1,0 +1,70 @@
+{
+  "name": "interlinear",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first Electron app for layered interlinear translations and XeLaTeX export.",
+  "productName": "Interlinear",
+  "main": "dist-electron/electron/main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
+    "dev:renderer": "vite --host 127.0.0.1",
+    "dev:electron": "npm run build:electron && wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .",
+    "build": "npm run typecheck && vite build && npm run build:electron",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build:icon": "node scripts/generate-placeholder-icon.mjs",
+    "package:mac": "npm run build:icon && npm run build && electron-builder --mac dir",
+    "test": "vitest run",
+    "test:smoke": "vitest run src/rendererSmoke.test.tsx electron/ipcHandlers.test.ts",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
+  },
+  "build": {
+    "appId": "com.richardkelley.interlinear",
+    "productName": "Interlinear",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "buildResources": "build",
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dir"
+      ],
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.icns",
+      "identity": null,
+      "hardenedRuntime": false
+    }
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.5.0",
+    "electron-is-dev": "^3.0.1",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.0.1",
+    "@types/node": "^20.17.10",
+    "@types/react": "^18.3.17",
+    "@types/react-dom": "^18.3.5",
+    "@vitest/coverage-v8": "^4.1.7",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^41.7.1",
+    "electron-builder": "^26.8.1",
+    "jsdom": "^25.0.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "vitest": "^4.1.7",
+    "wait-on": "^8.0.1"
+  }
+}
