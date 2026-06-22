@@ -94,6 +94,66 @@ describe("schemas", () => {
     expect(parsed.tokens[tokenId].textMetrics).toEqual({});
   });
 
+  it("defaults image objects to an empty source path", () => {
+    const document = createSampleDocument();
+    const parsed = DocumentSchema.parse({
+      ...document,
+      pages: [
+        {
+          ...document.pages[0],
+          pageObjects: [
+            {
+              id: "placeholder_image",
+              kind: "image",
+              rect: { x: 120, y: 90, width: 160, height: 100 },
+              wrapMode: "rectangular",
+              zIndex: 1,
+              caption: "",
+              metadata: {}
+            }
+          ]
+        }
+      ]
+    });
+
+    expect(parsed.pages[0].pageObjects[0]).toMatchObject({ kind: "image", assetPath: "" });
+  });
+
+  it("parses semantic text page object blocks", () => {
+    const document = createSampleDocument();
+    const parsed = DocumentSchema.parse({
+      ...document,
+      pages: [
+        {
+          ...document.pages[0],
+          pageObjects: [
+            {
+              id: "title_block",
+              kind: "titleBlock",
+              rect: { x: 54, y: 54, width: 420, height: 52 },
+              content: "A Title"
+            },
+            {
+              id: "subtitle_block",
+              kind: "subtitleBlock",
+              rect: { x: 54, y: 112, width: 380, height: 40 },
+              content: "A Subtitle"
+            },
+            {
+              id: "section_block",
+              kind: "sectionBlock",
+              rect: { x: 54, y: 170, width: 320, height: 34 },
+              content: "A Section"
+            }
+          ]
+        }
+      ]
+    });
+
+    expect(parsed.pages[0].pageObjects.map((object) => object.kind)).toEqual(["titleBlock", "subtitleBlock", "sectionBlock"]);
+    expect(parsed.pages[0].pageObjects[0]).toMatchObject({ wrapMode: "rectangular", zIndex: 1, metadata: {} });
+  });
+
   it("preserves span anchors on annotation cells", () => {
     const document = createSampleDocument();
     const span = Object.values(document.layerSpans)[0];

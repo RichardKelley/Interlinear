@@ -1,15 +1,21 @@
 import { createId } from "./ids.js";
 import {
   lineCollisionRects,
+  orderedVisibleLayers,
+  pageObjectCollisionRects,
   resolveLineCollisions,
   resolveWordBoxCollisions,
+  WORD_BOX_EMPTY_MIN_WIDTH,
+  wordBoxCollisionRectsForPositioned,
+  wordBoxCollisionRectsForToken,
   wordBoxRectFromPositioned,
   WORD_BOX_COLLISION_GAP
 } from "./collision.js";
-import { routeLine, sourceLineBoxHeight } from "./layout.js";
+import { routeLine, sourceLineBoxHeight, TOKEN_GAP } from "./layout.js";
 import type { InterlinearDocument, InterlinearLine, Page, Token } from "./schema.js";
 
 export const LINE_SNAP_DISTANCE = 28;
+const COLLISION_CONSTRAINT_EPSILON = 0.001;
 
 export function addLineToDocument(
   document: InterlinearDocument,
@@ -189,11 +195,23 @@ export function insertWordBoxAfterToken(
     tokenId,
     ...found.line.tokenIds.slice(sourceIndex + 1)
   ];
+  const sourcePositioned = routeLine(document, found.page, found.line).positionedTokens.find((item) => item.tokenId === sourceTokenId);
+  const sourceRect = sourcePositioned ? wordBoxRectFromPositioned(sourcePositioned) : null;
+  const targetX =
+    sourceRect && found.line.direction === "rtl"
+      ? sourceRect.x - WORD_BOX_EMPTY_MIN_WIDTH - TOKEN_GAP
+      : sourceRect
+        ? sourceRect.x + sourceRect.width + TOKEN_GAP
+        : document.pageSettings.marginLeft;
+  const tokenOffsetX = offsetForTokenX(document, found.page, found.line, tokenIds, tokenId, targetX, token);
   const next = {
     ...document,
     tokens: {
       ...document.tokens,
-      [tokenId]: token
+      [tokenId]: {
+        ...token,
+        offset: { x: tokenOffsetX, y: 0 }
+      }
     },
     pages: document.pages.map((page) =>
       page.id === found.page.id
@@ -310,38 +328,54 @@ export function moveTokenWithCollisionConstraints(
       }
     }
   };
-  const currentRect = tokenWordBoxRect(document, found.page, found.line, tokenId);
-  const proposedRect = tokenWordBoxRect(proposed, found.page, found.line, tokenId);
-  if (!currentRect || !proposedRect) return proposed;
+  const currentRects = wordBoxCollisionRectsForToken(document, found.page, found.line, tokenId);
+  const proposedRects = wordBoxCollisionRectsForToken(proposed, found.page, found.line, tokenId);
+  const currentRect = currentRects[0];
+  const proposedRect = proposedRects[0];
+  if (!currentRect || !proposedRect || currentRects.length !== proposedRects.length) return proposed;
 
   const dx = proposedRect.x - currentRect.x;
   if (dx === 0) return proposed;
 
-  let constrainedX = proposedRect.x;
+  let constrainedDx = dx;
+  const layers = orderedVisibleLayers(document);
   const stationaryRects = routeLine(document, found.page, found.line).positionedTokens
     .filter((positioned) => positioned.tokenId !== tokenId)
-    .map((positioned) => wordBoxRectFromPositioned(positioned));
+    .flatMap((positioned) => wordBoxCollisionRectsForPositioned(document, layers, positioned));
+  stationaryRects.push(...pageObjectCollisionRects(found.page));
 
   for (const rect of stationaryRects) {
-    if (!rectsOverlapVertically(proposedRect.y, proposedRect.height, rect.y, rect.height)) continue;
-    if (dx > 0 && currentRect.x + currentRect.width <= rect.x) {
-      constrainedX = Math.min(constrainedX, rect.x - proposedRect.width - WORD_BOX_COLLISION_GAP);
-    } else if (dx < 0 && currentRect.x >= rect.x + rect.width) {
-      constrainedX = Math.max(constrainedX, rect.x + rect.width + WORD_BOX_COLLISION_GAP);
-    }
+    currentRects.forEach((current, index) => {
+      const proposed = proposedRects[index];
+      if (!rectsOverlapVertically(proposed.y, proposed.height, rect.y, rect.height)) return;
+      if (dx > 0 && current.x + current.width <= rect.x) {
+        constrainedDx = Math.min(
+          constrainedDx,
+          rect.x - WORD_BOX_COLLISION_GAP - COLLISION_CONSTRAINT_EPSILON - (current.x + current.width)
+        );
+      } else if (dx < 0 && current.x >= rect.x + rect.width) {
+        constrainedDx = Math.max(
+          constrainedDx,
+          rect.x + rect.width + WORD_BOX_COLLISION_GAP + COLLISION_CONSTRAINT_EPSILON - current.x
+        );
+      }
+    });
   }
 
-  if (constrainedX === proposedRect.x) return proposed;
-  return {
-    ...document,
-    tokens: {
-      ...document.tokens,
-      [tokenId]: {
-        ...token,
-        offset: { ...offset, x: offset.x + constrainedX - proposedRect.x }
+  if (constrainedDx !== dx) {
+    return {
+      ...document,
+      tokens: {
+        ...document.tokens,
+        [tokenId]: {
+          ...token,
+          offset: { ...offset, x: offset.x + constrainedDx - dx }
+        }
       }
-    }
-  };
+    };
+  }
+
+  return proposed;
 }
 
 export function moveLineWithCollisionConstraints(

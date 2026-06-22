@@ -441,6 +441,10 @@ textarea {
 
 .page.placement-mode-word,
 .page.placement-mode-line,
+.page.placement-mode-image,
+.page.placement-mode-titleBlock,
+.page.placement-mode-subtitleBlock,
+.page.placement-mode-sectionBlock,
 .page.placement-mode-textBlock,
 .page.placement-mode-span {
   cursor: crosshair;
@@ -470,6 +474,10 @@ textarea {
 
 .page.placement-mode-word .line-guide,
 .page.placement-mode-line .line-guide,
+.page.placement-mode-image .line-guide,
+.page.placement-mode-titleBlock .line-guide,
+.page.placement-mode-subtitleBlock .line-guide,
+.page.placement-mode-sectionBlock .line-guide,
 .page.placement-mode-textBlock .line-guide {
   cursor: crosshair;
 }
@@ -481,6 +489,11 @@ textarea {
 
 .line-guide::before,
 .line-guide::after {
+  content: none;
+}
+
+.routing-band::before,
+.routing-band::after {
   background: rgba(50, 75, 62, 0.34);
   content: "";
   height: 1px;
@@ -489,19 +502,25 @@ textarea {
   right: 0;
 }
 
-.line-guide::before {
+.routing-band::before {
   top: 0;
 }
 
-.line-guide::after {
+.routing-band::after {
   bottom: 0;
 }
 
-.line-guide:hover::before,
-.line-guide:hover::after,
-.line-guide.selected::before,
-.line-guide.selected::after {
+.line-guide:hover ~ .routing-band::before,
+.line-guide:hover ~ .routing-band::after,
+.line-layer.selected .routing-band::before,
+.line-layer.selected .routing-band::after {
   background: #2f5d48;
+}
+
+.line-layer.snap-target .routing-band::before,
+.line-layer.snap-target .routing-band::after {
+  background: #244c3a;
+  height: 2px;
 }
 
 .line-guide:focus-visible {
@@ -619,16 +638,6 @@ textarea {
   box-shadow: 0 0 0 2px rgba(46, 106, 80, 0.18);
 }
 
-.drop-slot {
-  background: #2e6a50;
-  border-radius: 999px;
-  box-shadow: 0 0 0 3px rgba(46, 106, 80, 0.16);
-  pointer-events: none;
-  position: absolute;
-  width: 2px;
-  z-index: 4;
-}
-
 .word-box,
 .annotation-word-box {
   align-items: center;
@@ -636,7 +645,23 @@ textarea {
   border-color: rgba(181, 171, 154, 0.45);
   display: flex;
   justify-content: center;
-  padding: 1px 5px;
+  padding: 0 3px;
+}
+
+.page.guides-hidden .word-box,
+.page.guides-hidden .annotation-word-box {
+  background: transparent;
+  border: 0;
+  border-style: none;
+  box-shadow: none;
+}
+
+.page.guides-hidden .word-box:hover,
+.page.guides-hidden .word-box.selected,
+.page.guides-hidden .annotation-word-box:hover,
+.page.guides-hidden .annotation-word-box.selected {
+  border-color: transparent;
+  box-shadow: none;
 }
 
 .word-input {
@@ -648,13 +673,17 @@ textarea {
   height: 100%;
   line-height: 1;
   min-width: 0;
-  padding: 0 2px;
+  padding: 0;
   text-align: center;
   width: 100%;
 }
 
 .word-input:focus {
   outline: 0;
+}
+
+.annotation-input {
+  padding: 0;
 }
 
 .word-box.editing,
@@ -685,6 +714,49 @@ textarea {
   cursor: grab;
   overflow: hidden;
   position: absolute;
+}
+
+.page-object.editing {
+  cursor: text;
+}
+
+.page-object-text-input {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  box-sizing: border-box;
+  display: block;
+  font-family: inherit;
+  height: 100%;
+  margin: 0;
+  outline: 0;
+  overflow: hidden;
+  width: 100%;
+}
+
+.page.guides-hidden .page-object-textBlock,
+.page.guides-hidden .page-object-titleBlock,
+.page.guides-hidden .page-object-subtitleBlock,
+.page.guides-hidden .page-object-sectionBlock,
+.page.guides-hidden .page-object-textBlock:hover,
+.page.guides-hidden .page-object-titleBlock:hover,
+.page.guides-hidden .page-object-subtitleBlock:hover,
+.page.guides-hidden .page-object-sectionBlock:hover,
+.page.guides-hidden .page-object-textBlock.selected,
+.page.guides-hidden .page-object-titleBlock.selected,
+.page.guides-hidden .page-object-subtitleBlock.selected,
+.page.guides-hidden .page-object-sectionBlock.selected {
+  background: transparent;
+  border: 0;
+  border-style: none;
+  box-shadow: none;
+}
+
+.page.guides-hidden .page-object-textBlock .page-object-resize-handle,
+.page.guides-hidden .page-object-titleBlock .page-object-resize-handle,
+.page.guides-hidden .page-object-subtitleBlock .page-object-resize-handle,
+.page.guides-hidden .page-object-sectionBlock .page-object-resize-handle {
+  display: none;
 }
 
 .page-object-resize-handle {
@@ -737,10 +809,38 @@ textarea {
 
 .text-block {
   color: #35352d;
-  font-size: 12px;
   line-height: 1.35;
   padding: 9px;
   white-space: pre-wrap;
+}
+
+.body-text-block {
+  font-size: 12px;
+}
+
+.title-block {
+  color: #1f241c;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.12;
+  padding: 10px 12px;
+}
+
+.subtitle-block {
+  color: #555a50;
+  font-size: 16px;
+  font-style: italic;
+  line-height: 1.24;
+  padding: 8px 12px;
+}
+
+.section-block {
+  color: #252a22;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1.2;
+  padding: 8px 10px;
 }
 
 .object-caption {
@@ -760,6 +860,17 @@ textarea {
   display: grid;
   height: 100%;
   justify-content: center;
+}
+
+.image-source-controls {
+  display: grid;
+  gap: 6px;
+}
+
+.asset-path {
+  color: #6a6257;
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .suggestions {

@@ -1,6 +1,16 @@
 import { routeLine } from "./layout.js";
 import type { InterlinearDocument, PageObject } from "./schema.js";
 
+type TextPageObject = Exclude<PageObject, { kind: "image" }>;
+type TextPageObjectKind = TextPageObject["kind"];
+
+const TEXT_PAGE_OBJECT_EXPORT_STYLES: Record<TextPageObjectKind, { fontSize: number; leading: number; prefix: string }> = {
+  textBlock: { fontSize: 10, leading: 12, prefix: "" },
+  titleBlock: { fontSize: 22, leading: 26, prefix: "\\bfseries " },
+  subtitleBlock: { fontSize: 15, leading: 19, prefix: "\\itshape " },
+  sectionBlock: { fontSize: 14, leading: 17, prefix: "\\bfseries " }
+};
+
 export function escapeLatex(value: string): string {
   return value
     .replace(/\\/g, "\\textbackslash{}")
@@ -41,6 +51,7 @@ function pageNumberNode(pageNumber: number, document: InterlinearDocument): stri
 
 function pageObjectToLatex(object: PageObject): string {
   if (object.kind === "image") {
+    if (!object.assetPath.trim()) return "";
     return [
       `\\put(${coord(object.rect.x)},${coord(-object.rect.y)}){\\includegraphics[width=${pt(object.rect.width)},height=${pt(
         object.rect.height
@@ -48,11 +59,12 @@ function pageObjectToLatex(object: PageObject): string {
     ].join("\n");
   }
 
+  const style = TEXT_PAGE_OBJECT_EXPORT_STYLES[object.kind];
   return [
     `\\put(${coord(object.rect.x)},${coord(-object.rect.y)}){\\begin{minipage}[t][${pt(object.rect.height)}][t]{${pt(
       object.rect.width
     )}}`,
-    `\\fontsize{10}{12}\\selectfont ${escapeLatex(object.content)}`,
+    `\\fontsize{${style.fontSize}}{${style.leading}}\\selectfont ${style.prefix}${escapeLatex(object.content)}`,
     "\\end{minipage}}"
   ].join("\n");
 }

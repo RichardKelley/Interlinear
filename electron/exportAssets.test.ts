@@ -33,6 +33,16 @@ describe("export asset resolution", () => {
       /Missing export asset: assets\/missing\.png/
     );
   });
+
+  it("skips image placeholders without source assets", async () => {
+    const root = await mkdtemp(join(tmpdir(), "interlinear-export-placeholder-"));
+    const resolved = await resolveDocumentAssetsForExport(withImageAsset(""), join(root, "sample.iltdoc"));
+
+    expect(resolved.pages[0].pageObjects[0]).toMatchObject({
+      kind: "image",
+      assetPath: ""
+    });
+  });
 });
 
 function withImageAsset(assetPath: string) {

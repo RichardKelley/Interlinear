@@ -19,13 +19,23 @@ function editWordBox(label: string, value: string) {
   fireEvent.change(input, { target: { value } });
 }
 
-const DEFAULT_ZOOM = 1;
+const DEFAULT_ZOOM = 1.5;
 
 function clickPageAt(container: HTMLElement, x: number, y: number) {
   fireEvent.click(container.querySelector(".page") as HTMLElement, { clientX: x * DEFAULT_ZOOM, clientY: y * DEFAULT_ZOOM });
 }
 
-function activatePlacementMode(label: "Add word box" | "Add line" | "Add text block" | "Add concept span") {
+function activatePlacementMode(
+  label:
+    | "Add word box"
+    | "Add line"
+    | "Add image"
+    | "Add title block"
+    | "Add subtitle block"
+    | "Add section block"
+    | "Add text block"
+    | "Add concept span"
+) {
   const button = screen.getByRole("button", { name: label });
   if (button.getAttribute("aria-pressed") !== "true") {
     fireEvent.click(button);
@@ -108,12 +118,46 @@ describe("App editor", () => {
 
     expect(screen.queryByRole("slider", { name: "Zoom" })).not.toBeInTheDocument();
     expect(screen.getByText("100%")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reset zoom" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+    expect(screen.getByText("110%")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reset zoom" })).not.toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset zoom" }));
+    expect(screen.getByText("100%")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reset zoom" })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
     expect(screen.getByText("110%")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Zoom out" }));
     expect(screen.getByText("100%")).toBeInTheDocument();
+  });
+
+  it("zooms from pinch-style wheel gestures without hijacking ordinary scrolling", () => {
+    const { container } = render(<App />);
+    const pageScroll = container.querySelector(".page-scroll") as HTMLElement;
+
+    fireEvent.wheel(pageScroll, { clientX: 300, clientY: 300, deltaY: -100 });
+    expect(screen.getByText("100%")).toBeInTheDocument();
+
+    fireEvent.wheel(pageScroll, { clientX: 300, clientY: 300, ctrlKey: true, deltaY: -100 });
+    expect(screen.getByText("108%")).toBeInTheDocument();
+
+    fireEvent.wheel(pageScroll, { clientX: 300, clientY: 300, ctrlKey: true, deltaY: 100 });
+    expect(screen.getByText("100%")).toBeInTheDocument();
+  });
+
+  it("zooms with a middle-button drag on the page surface", () => {
+    const { container } = render(<App />);
+    const pageScroll = container.querySelector(".page-scroll") as HTMLElement;
+
+    fireEvent(pageScroll, pointerEvent("pointerdown", 300, 300, { button: 1, buttons: 4 }));
+    fireEvent(window, pointerEvent("pointermove", 300, 240));
+    expect(screen.getByText("120%")).toBeInTheDocument();
+
+    fireEvent.pointerUp(window);
   });
 
   it("keeps undo and redo disabled until command history changes", () => {
@@ -314,7 +358,63 @@ describe("App editor", () => {
     expect(screen.getByText("File details")).toBeInTheDocument();
   });
 
-  it("imports an image without forcing an unsaved document through Save", async () => {
+  it("places an empty image box without opening a file picker", () => {
+    const importImage = vi.fn();
+    Object.defineProperty(window, "interlinear", {
+      configurable: true,
+      value: {
+        importImage,
+        fileToAssetUrl: vi.fn()
+      }
+    });
+
+    const { container } = render(<App />);
+    const initialObjectCount = container.querySelectorAll(".page-object").length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Add image" }));
+
+    expect(screen.getByRole("button", { name: "Add image" })).toHaveAttribute("aria-pressed", "true");
+    expect(importImage).not.toHaveBeenCalled();
+    expect(container.querySelectorAll(".page-object")).toHaveLength(initialObjectCount);
+
+    clickPageAt(container, 240, 310);
+
+    expect(screen.getByText("Added image box.")).toBeInTheDocument();
+    expect(importImage).not.toHaveBeenCalled();
+    expect(container.querySelectorAll(".page-object")).toHaveLength(initialObjectCount + 1);
+    expect(Number.parseFloat((container.querySelectorAll(".page-object")[initialObjectCount] as HTMLElement).style.left)).toBeCloseTo(
+      240
+    );
+    expect(Number.parseFloat((container.querySelectorAll(".page-object")[initialObjectCount] as HTMLElement).style.top)).toBeCloseTo(
+      310
+    );
+    expect(screen.getByRole("button", { name: "Add image" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Choose image file" })).toBeInTheDocument();
+    expect(screen.getByText("No image selected")).toBeInTheDocument();
+  });
+
+  it("keeps image boxes inside margins and routes lines around their padded boundary", () => {
+    const { container } = render(<App />);
+    const initialObjectCount = container.querySelectorAll(".page-object").length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Add image" }));
+    clickPageAt(container, 600, 10);
+
+    const imageObject = container.querySelectorAll<HTMLElement>(".page-object")[initialObjectCount];
+    expect(Number.parseFloat(imageObject.style.left)).toBeCloseTo(388);
+    expect(Number.parseFloat(imageObject.style.top)).toBeCloseTo(54);
+    expect(Number.parseFloat((container.querySelector(".routing-band") as HTMLElement).style.width)).toBeCloseTo(322);
+
+    fireEvent.pointerDown(imageObject, pointerInit(0, 0));
+    fireEvent(window, pointerEvent("pointermove", -999 * DEFAULT_ZOOM, 999 * DEFAULT_ZOOM));
+
+    const draggedImageObject = container.querySelectorAll<HTMLElement>(".page-object")[initialObjectCount];
+    expect(Number.parseFloat(draggedImageObject.style.left)).toBeCloseTo(54);
+    expect(Number.parseFloat(draggedImageObject.style.top)).toBeCloseTo(618);
+    fireEvent.pointerUp(window);
+  });
+
+  it("chooses an image file for the selected image box without saving first", async () => {
     const saveDocument = vi.fn();
     const importImage = vi.fn(async () => ({
       assetPath: "/tmp/interlinear/plate.png",
@@ -334,12 +434,16 @@ describe("App editor", () => {
     const initialObjectCount = container.querySelectorAll(".page-object").length;
 
     fireEvent.click(screen.getByRole("button", { name: "Add image" }));
+    clickPageAt(container, 240, 310);
+    fireEvent.click(screen.getByRole("button", { name: "Choose image file" }));
 
-    expect(await screen.findByText("Imported plate.png.")).toBeInTheDocument();
+    expect(await screen.findByText("Selected plate.png.")).toBeInTheDocument();
     expect(saveDocument).not.toHaveBeenCalled();
     expect(importImage).toHaveBeenCalledWith(null);
     expect(fileToAssetUrl).toHaveBeenCalledWith("/tmp/interlinear/plate.png");
     expect(container.querySelectorAll(".page-object")).toHaveLength(initialObjectCount + 1);
+    expect(screen.getByText("plate.png")).toBeInTheDocument();
+    expect(screen.getByAltText("Page image")).toHaveAttribute("src", "file:///tmp/interlinear/plate.png");
   });
 
   it("shows clear document and lexicon open validation errors", async () => {
@@ -360,7 +464,7 @@ describe("App editor", () => {
 
     expect(await screen.findByText("Cannot open document: file validation failed.")).toBeInTheDocument();
     expect(screen.getByText("File details")).toBeInTheDocument();
-    expect(screen.getByText(/title/)).toBeInTheDocument();
+    expect(screen.getByText("Document schema validation failed at title: Expected string, received number")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Open lexicon" }));
 
@@ -699,13 +803,26 @@ describe("App editor", () => {
 
   it("toggles minimal line guide visibility from the ribbon", () => {
     const { container } = render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Add below annotation for το" }));
+    const lowerAnnotationBox = screen.getByRole("button", { name: "below annotation for το" }) as HTMLElement;
 
     expect(container.querySelectorAll(".line-guide").length).toBeGreaterThan(0);
+    expect(container.querySelectorAll(".annotation-connector").length).toBeGreaterThan(0);
+    expect(container.querySelectorAll(".annotation-handle").length).toBeGreaterThan(0);
+    expect(container.querySelector(".page")).not.toHaveClass("guides-hidden");
     expect(container.querySelector(".line-handle")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Hide line guides" }));
 
     expect(container.querySelectorAll(".line-guide")).toHaveLength(0);
     expect(container.querySelectorAll(".routing-band")).toHaveLength(0);
+    expect(container.querySelectorAll(".annotation-connector")).toHaveLength(0);
+    expect(container.querySelectorAll(".annotation-handle")).toHaveLength(0);
+    expect(container.querySelector(".page")).toHaveClass("guides-hidden");
+    expect(container.querySelectorAll(".word-box").length).toBeGreaterThan(0);
+    expect(getComputedStyle(lowerAnnotationBox).backgroundColor).toBe("rgba(0, 0, 0, 0)");
+    expect(["", "none"]).toContain(getComputedStyle(lowerAnnotationBox).borderTopStyle);
+    expect(["", "none"]).toContain(getComputedStyle(lowerAnnotationBox).boxShadow);
+    expect(screen.getByLabelText("Annotation below for το")).toBeInTheDocument();
   });
 
   it("labels ribbon groups and exposes action tooltips", () => {
@@ -737,18 +854,23 @@ describe("App editor", () => {
     expect(screen.getByRole("button", { name: "Show Literal layer" })).toHaveAttribute("aria-pressed", "false");
   });
 
-  it("shows annotation handles by default and toggles them from the ribbon", () => {
-    const { container } = render(<App />);
+  it("shows annotation handles with guides and does not expose a separate handle toggle", () => {
+    const legacyDocument = { ...createSampleDocument(), annotationHandlesVisible: false };
+    const { container } = render(<App initialDocument={legacyDocument} />);
 
-    expect(screen.getByRole("button", { name: "Hide annotation handles" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByRole("button", { name: "Hide annotation handles" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Show annotation handles" })).not.toBeInTheDocument();
     expect(container.querySelectorAll(".annotation-handle").length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "Add above annotation for το" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add below annotation for το" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Hide annotation handles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hide line guides" }));
 
     expect(container.querySelectorAll(".annotation-handle")).toHaveLength(0);
-    expect(screen.getByRole("button", { name: "Show annotation handles" })).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(screen.getByRole("button", { name: "Show line guides" }));
+
+    expect(container.querySelectorAll(".annotation-handle").length).toBeGreaterThan(0);
   });
 
   it("creates and focuses token-anchored annotations from handles", () => {
@@ -806,6 +928,58 @@ describe("App editor", () => {
     expect((screen.getByLabelText("Annotation") as HTMLInputElement).value).toBe("essence");
   });
 
+  it("deletes selected word boxes with Delete and removes dependent annotations and spans", () => {
+    const { container } = render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add above annotation for το" }));
+    fireEvent.change(screen.getByLabelText("Annotation"), { target: { value: "the" } });
+    fireEvent.click(screen.getByLabelText("Word box το").closest(".word-box") as HTMLElement);
+    fireEvent.keyDown(window, { key: "Delete" });
+
+    expect(screen.queryByLabelText("Word box το")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "what-it-was-to-be", exact: true })).not.toBeInTheDocument();
+    expect(container.querySelectorAll(".annotation")).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect(screen.getByLabelText("Word box το")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "what-it-was-to-be", exact: true })).toBeInTheDocument();
+    expect(screen.getByLabelText("Annotation above for το")).toHaveValue("the");
+  });
+
+  it("deletes selected line guides with x outside typing mode", () => {
+    const { container } = render(<App />);
+    const lineGuide = container.querySelector(".line-guide") as HTMLElement;
+
+    fireEvent.pointerDown(lineGuide, pointerInit(0, 0));
+    fireEvent.pointerUp(window);
+    fireEvent.keyDown(window, { key: "x" });
+
+    expect(container.querySelectorAll(".line-guide")).toHaveLength(0);
+    expect(container.querySelectorAll(".word-box")).toHaveLength(0);
+    expect(screen.queryByRole("button", { name: "what-it-was-to-be", exact: true })).not.toBeInTheDocument();
+  });
+
+  it("does not delete nodes while a word box is in typing mode", () => {
+    render(<App />);
+    const wordBox = screen.getByLabelText("Word box το").closest(".word-box") as HTMLElement;
+
+    fireEvent.doubleClick(wordBox);
+    fireEvent.keyDown(window, { key: "x" });
+    fireEvent.keyDown(window, { key: "Delete" });
+
+    expect(screen.getByLabelText("Word box το")).toBeInTheDocument();
+  });
+
+  it("deletes selected page objects with Delete", () => {
+    const { container } = render(<App />);
+    const pageObject = container.querySelector(".page-object") as HTMLElement;
+
+    fireEvent.click(pageObject);
+    fireEvent.keyDown(window, { key: "Delete" });
+
+    expect(container.querySelectorAll(".page-object")).toHaveLength(0);
+  });
+
   it("keeps token-anchored annotations attached while dragging the source word", () => {
     const { container } = render(<App />);
 
@@ -821,6 +995,22 @@ describe("App editor", () => {
     expect(Number.parseFloat(movedAnnotation.style.left)).toBeGreaterThan(initialLeft);
     fireEvent.pointerUp(window);
     expect(container.querySelectorAll(".annotation")).toHaveLength(1);
+  });
+
+  it("bolds the line guide that will receive a snapped word box", () => {
+    const { container } = render(<App />);
+    placeLineAt(container, 90, 240);
+    const wordBox = screen.getByLabelText("Word box το").closest(".word-box") as HTMLElement;
+
+    fireEvent.pointerDown(wordBox, pointerInit(0, 0));
+    fireEvent(window, pointerEvent("pointermove", 0, 120 * DEFAULT_ZOOM));
+
+    const snapTargets = container.querySelectorAll(".line-guide.snap-target");
+    expect(snapTargets).toHaveLength(1);
+    expect((snapTargets[0] as HTMLElement).style.top).toBe("240px");
+    fireEvent.pointerUp(window);
+
+    expect(container.querySelectorAll(".line-guide.snap-target")).toHaveLength(0);
   });
 
   it("keeps span-anchored annotations attached while dragging the concept span", () => {
@@ -843,12 +1033,14 @@ describe("App editor", () => {
     const { container } = render(<App />);
     const page = container.querySelector(".page") as HTMLElement;
     const lineGuide = container.querySelector(".line-guide") as HTMLElement;
+    const routingBand = container.querySelector(".routing-band") as HTMLElement;
     const wordBox = container.querySelector(".word-box") as HTMLElement;
 
     expect(lineGuide.style.left).toBe("54px");
     expect(lineGuide.style.width).toBe(`${Number.parseFloat(page.style.width) - 108}px`);
     expect(lineGuide.style.height).toBe(wordBox.style.height);
     expect(lineGuide.style.height).toBe(wordBox.style.minHeight);
+    expect(routingBand.style.height).toBe(lineGuide.style.height);
     expect(getComputedStyle(lineGuide).height).toBe("16px");
     expect(container.querySelector(".line-handle")).not.toBeInTheDocument();
   });
@@ -899,12 +1091,12 @@ describe("App editor", () => {
     const lineHeight = Number.parseFloat(lineGuide.style.height);
 
     fireEvent.pointerDown(lineGuide, pointerInit(0, 0));
-    fireEvent(window, pointerEvent("pointermove", 0, -999));
+    fireEvent(window, pointerEvent("pointermove", 0, -999 * DEFAULT_ZOOM));
     fireEvent.pointerUp(window);
     expect((container.querySelector(".line-guide") as HTMLElement).style.top).toBe("54px");
 
     fireEvent.pointerDown(container.querySelector(".line-guide") as HTMLElement, pointerInit(0, 0));
-    fireEvent(window, pointerEvent("pointermove", 0, 999));
+    fireEvent(window, pointerEvent("pointermove", 0, 999 * DEFAULT_ZOOM));
     fireEvent.pointerUp(window);
 
     expect(Number.parseFloat((container.querySelector(".line-guide") as HTMLElement).style.top)).toBe(792 - 54 - lineHeight);
@@ -973,6 +1165,77 @@ describe("App editor", () => {
     expect(pageObject).toHaveTextContent("Independent text block");
   });
 
+  it.each([
+    ["Add title block", "Title", "title-block", 420, 52],
+    ["Add subtitle block", "Subtitle", "subtitle-block", 380, 40],
+    ["Add section block", "Section", "section-block", 320, 36]
+  ] as const)("places a %s element at the clicked page location", (buttonLabel, content, className, width, height) => {
+    const { container } = rtlRender(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: buttonLabel }));
+    expect(screen.getByRole("button", { name: buttonLabel })).toHaveAttribute("aria-pressed", "true");
+
+    clickPageAt(container, 80, 90);
+
+    const pageObject = container.querySelector(".page-object") as HTMLElement;
+    expect(pageObject).toBeInTheDocument();
+    expect(pageObject.querySelector(`.${className}`)).toBeInTheDocument();
+    expect(Number.parseFloat(pageObject.style.left)).toBeCloseTo(80);
+    expect(Number.parseFloat(pageObject.style.top)).toBeCloseTo(90);
+    expect(Number.parseFloat(pageObject.style.width)).toBeCloseTo(width);
+    expect(Number.parseFloat(pageObject.style.height)).toBeCloseTo(height);
+    expect(pageObject).toHaveTextContent(content);
+    expect(screen.getByRole("button", { name: buttonLabel })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it.each([
+    ["Add title block", "Title", "Title block text", "Edited title"],
+    ["Add subtitle block", "Subtitle", "Subtitle block text", "Edited subtitle"],
+    ["Add section block", "Section", "Section block text", "Edited section"]
+  ] as const)("edits a %s element inline after double click", async (buttonLabel, content, inputLabel, editedContent) => {
+    const { container } = rtlRender(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: buttonLabel }));
+    clickPageAt(container, 80, 90);
+
+    const pageObject = container.querySelector(".page-object") as HTMLElement;
+    fireEvent.doubleClick(pageObject);
+
+    const input = screen.getByLabelText<HTMLInputElement>(inputLabel);
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input).toHaveValue(content);
+
+    fireEvent.keyDown(window, { key: "x" });
+    expect(container.querySelectorAll(".page-object")).toHaveLength(1);
+
+    fireEvent.change(input, { target: { value: editedContent } });
+    expect(input).toHaveValue(editedContent);
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.queryByLabelText(inputLabel)).not.toBeInTheDocument();
+    expect(pageObject).toHaveTextContent(editedContent);
+  });
+
+  it("hides title block wrapper chrome with visual guides", () => {
+    const { container } = rtlRender(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add title block" }));
+    clickPageAt(container, 80, 90);
+
+    const pageObject = container.querySelector(".page-object-titleBlock") as HTMLElement;
+    expect(screen.getByRole("button", { name: "Resize page object southeast" })).toBeInTheDocument();
+    expect(pageObject).toHaveTextContent("Title");
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide line guides" }));
+
+    const style = getComputedStyle(pageObject);
+    expect(style.backgroundColor).toBe("rgba(0, 0, 0, 0)");
+    expect(["", "none"]).toContain(style.borderTopStyle);
+    expect(["", "none"]).toContain(style.boxShadow);
+    expect(screen.queryByRole("button", { name: "Resize page object southeast" })).not.toBeInTheDocument();
+    expect(pageObject).toHaveTextContent("Title");
+  });
+
   it("places a word on an existing line guide while word placement mode is active", () => {
     const { container } = rtlRender(<App />);
     const addWord = activateStickyPlacementMode("Add word box");
@@ -1026,6 +1289,37 @@ describe("App editor", () => {
 
     expect(screen.getByLabelText("Word box logos")).toHaveValue("logos");
     expect(screen.getByRole("button", { name: "Undo" })).not.toBeDisabled();
+  });
+
+  it("keeps editing when a growing word box reflows to a new line", async () => {
+    const { container } = render(<App />);
+    const input = screen.getByLabelText<HTMLInputElement>("Word box το");
+    const wordBox = input.closest(".word-box") as HTMLElement;
+    const initialLineCount = container.querySelectorAll(".line-guide").length;
+    const longWord = "supercalifragilisticexpialidocioussupercalifragilisticexpialidocious";
+
+    fireEvent.doubleClick(wordBox);
+    await waitFor(() => expect(input).not.toHaveAttribute("readonly"));
+    await waitFor(() => expect(document.activeElement).toBe(input));
+
+    fireEvent.change(input, { target: { value: longWord } });
+
+    await waitFor(() => expect(container.querySelectorAll(".line-guide").length).toBeGreaterThan(initialLineCount));
+    const movedInput = [...container.querySelectorAll<HTMLInputElement>(".word-box .word-input")].find(
+      (candidate) => candidate.value === longWord
+    )!;
+
+    await waitFor(() => expect(document.activeElement).toBe(movedInput));
+    movedInput.focus();
+    fireEvent.blur(movedInput);
+    movedInput.focus();
+
+    await waitFor(() => expect(movedInput).not.toHaveAttribute("readonly"));
+    fireEvent.change(movedInput, { target: { value: `${longWord}x` } });
+
+    expect(
+      [...container.querySelectorAll<HTMLInputElement>(".word-box .word-input")].find((candidate) => candidate.value === `${longWord}x`)
+    ).toBeInTheDocument();
   });
 
   it("creates and focuses the next word box when pressing Space while editing", () => {
@@ -1259,7 +1553,7 @@ describe("App editor", () => {
 
     fireEvent.pointerDown(lastBox, pointerInit(0, 0));
     fireEvent(window, pointerEvent("pointermove", dx, dy));
-    expect(container.querySelector(".drop-slot")).toBeInTheDocument();
+    expect(container.querySelector(".drop-slot")).not.toBeInTheDocument();
     expect(findOverlappingWordBoxes(container)).toEqual([]);
     fireEvent.pointerUp(window);
 
@@ -1272,9 +1566,11 @@ function pointerInit(clientX: number, clientY: number): { clientX: number; clien
   return { clientX, clientY };
 }
 
-function pointerEvent(type: string, clientX: number, clientY: number): Event {
+function pointerEvent(type: string, clientX: number, clientY: number, options: { button?: number; buttons?: number } = {}): Event {
   const event = new Event(type, { bubbles: true, cancelable: true });
   Object.defineProperties(event, {
+    button: { value: options.button ?? 0 },
+    buttons: { value: options.buttons ?? 0 },
     clientX: { value: clientX },
     clientY: { value: clientY }
   });

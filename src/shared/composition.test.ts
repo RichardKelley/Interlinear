@@ -10,9 +10,16 @@ import {
   normalizeTokenLayout,
   snapTokenToNearestLine
 } from "./composition";
-import { ANNOTATION_CONNECTOR_LENGTH, findLineCollisions, findWordBoxCollisions, WORD_BOX_COLLISION_GAP } from "./collision";
+import {
+  ANNOTATION_CONNECTOR_LENGTH,
+  findLineCollisions,
+  findWordBoxCollisions,
+  findWordBoxObstacleCollisions,
+  wordBoxRectFromPositioned,
+  WORD_BOX_COLLISION_GAP
+} from "./collision";
 import { createEmptyDocument, createSampleDocument } from "./documentFactory";
-import { routeLine, sourceLineBoxHeight } from "./layout";
+import { IMAGE_OBJECT_EXTERNAL_PADDING, routeLine, sourceLineBoxHeight, TOKEN_GAP } from "./layout";
 import { tokenTextMetricKey } from "./textMetrics";
 
 describe("page composition", () => {
@@ -106,6 +113,34 @@ describe("page composition", () => {
     const nextLine = next.pages[0].lines.find((item) => item.id === line.id)!;
 
     expect(next.tokens.tok_after).toMatchObject({ text: "", lineId: line.id, direction: roomyDoc.tokens[sourceTokenId].direction });
+    expect(nextLine.tokenIds.slice(1, 3)).toEqual([sourceTokenId, "tok_after"]);
+    expect(findWordBoxCollisions(next, next.pages[0], nextLine)).toHaveLength(0);
+  });
+
+  it("places a space-created word box after the current rendered word box", () => {
+    const doc = createSampleDocument();
+    const page = { ...doc.pages[0], pageObjects: [] };
+    const roomyDoc = { ...doc, pageSettings: { ...doc.pageSettings, width: 1000 }, pages: [page] };
+    const line = page.lines[0];
+    const sourceTokenId = line.tokenIds[1];
+    const shifted = {
+      ...roomyDoc,
+      tokens: {
+        ...roomyDoc.tokens,
+        [sourceTokenId]: {
+          ...roomyDoc.tokens[sourceTokenId],
+          offset: { x: 140, y: 0 }
+        }
+      }
+    };
+
+    const next = insertWordBoxAfterToken(shifted, sourceTokenId, "tok_after");
+    const nextLine = next.pages[0].lines.find((item) => item.id === line.id)!;
+    const routed = routeLine(next, next.pages[0], nextLine);
+    const sourceRect = wordBoxRectFromPositioned(routed.positionedTokens.find((item) => item.tokenId === sourceTokenId)!);
+    const insertedRect = wordBoxRectFromPositioned(routed.positionedTokens.find((item) => item.tokenId === "tok_after")!);
+
+    expect(insertedRect.x).toBeGreaterThanOrEqual(sourceRect.x + sourceRect.width + TOKEN_GAP);
     expect(nextLine.tokenIds.slice(1, 3)).toEqual([sourceTokenId, "tok_after"]);
     expect(findWordBoxCollisions(next, next.pages[0], nextLine)).toHaveLength(0);
   });
@@ -391,6 +426,100 @@ describe("page composition", () => {
     expect(routeLine(moved, moved.pages[0], moved.pages[0].lines[0]).positionedTokens[1].rect.x).toBeGreaterThan(
       routeLine(moved, moved.pages[0], moved.pages[0].lines[0]).positionedTokens[0].rect.x
     );
+  });
+
+  it("constrains free horizontal token movement at neighboring annotation collisions", () => {
+    const doc = createSampleDocument();
+    const page = { ...doc.pages[0], pageObjects: [] };
+    const line = { ...page.lines[0], tokenIds: page.lines[0].tokenIds.slice(0, 2) };
+    const [firstTokenId, secondTokenId] = line.tokenIds;
+    const settings = { ...doc.pageSettings, width: 1200 };
+    const annotated = {
+      ...doc,
+      pageSettings: settings,
+      pages: [{ ...page, lines: [line] }],
+      tokens: {
+        ...doc.tokens,
+        [firstTokenId]: {
+          ...doc.tokens[firstTokenId],
+          text: "a",
+          textMetrics: { [tokenTextMetricKey("a", settings)]: 20 }
+        },
+        [secondTokenId]: {
+          ...doc.tokens[secondTokenId],
+          text: "b",
+          offset: { x: 260, y: 0 },
+          textMetrics: { [tokenTextMetricKey("b", settings)]: 20 }
+        }
+      },
+      annotationCells: {
+        ann_first: {
+          id: "ann_first",
+          tokenId: firstTokenId,
+          layerId: doc.layers[0].id,
+          text: "a long annotation for the first token",
+          placement: "above" as const,
+          offset: { x: 0, y: 0 }
+        },
+        ann_second: {
+          id: "ann_second",
+          tokenId: secondTokenId,
+          layerId: doc.layers[0].id,
+          text: "a long annotation for the second token",
+          placement: "above" as const,
+          offset: { x: 0, y: 0 }
+        }
+      }
+    };
+
+    expect(findWordBoxCollisions(annotated, annotated.pages[0], annotated.pages[0].lines[0], WORD_BOX_COLLISION_GAP)).toHaveLength(0);
+
+    const moved = moveTokenWithCollisionConstraints(annotated, secondTokenId, {
+      ...annotated.tokens[secondTokenId].offset,
+      x: annotated.tokens[secondTokenId].offset.x - 220
+    });
+
+    expect(findWordBoxCollisions(moved, moved.pages[0], moved.pages[0].lines[0], WORD_BOX_COLLISION_GAP)).toHaveLength(0);
+    expect(moved.tokens[secondTokenId].offset.x).toBeGreaterThan(annotated.tokens[secondTokenId].offset.x - 220);
+  });
+
+  it("constrains free horizontal token movement at padded image boundaries", () => {
+    const doc = createEmptyDocument();
+    const page = doc.pages[0];
+    const withWord = addWordBoxToDocument(doc, page.id, "tok_first", { x: 100, y: 120 });
+    const line = withWord.pages[0].lines[0];
+    const withImage = {
+      ...withWord,
+      pages: [
+        {
+          ...withWord.pages[0],
+          pageObjects: [
+            {
+              id: "image_obstacle",
+              kind: "image" as const,
+              rect: { x: 180, y: line.y - 12, width: 80, height: 80 },
+              wrapMode: "rectangular" as const,
+              zIndex: 1,
+              assetPath: "",
+              caption: "",
+              metadata: {}
+            }
+          ]
+        }
+      ]
+    };
+
+    const moved = moveTokenWithCollisionConstraints(withImage, "tok_first", {
+      ...withImage.tokens.tok_first.offset,
+      x: withImage.tokens.tok_first.offset.x + 160
+    });
+    const movedLine = moved.pages[0].lines[0];
+    const movedRect = wordBoxRectFromPositioned(
+      routeLine(moved, moved.pages[0], movedLine).positionedTokens.find((item) => item.tokenId === "tok_first")!
+    );
+
+    expect(findWordBoxObstacleCollisions(moved, moved.pages[0], movedLine)).toHaveLength(0);
+    expect(movedRect.x + movedRect.width + WORD_BOX_COLLISION_GAP).toBeLessThanOrEqual(180 - IMAGE_OBJECT_EXTERNAL_PADDING);
   });
 
   it("constrains free vertical line movement at neighboring guide collisions", () => {

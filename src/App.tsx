@@ -5,9 +5,13 @@ import {
   EyeOff,
   FileDown,
   FolderOpen,
+  Heading1,
+  Heading2,
+  Heading3,
   ImagePlus,
   Layers,
   Plus,
+  RotateCcw,
   Save,
   SquarePen,
   Type,
@@ -20,7 +24,9 @@ import {
   Fragment,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
+  WheelEvent as ReactWheelEvent,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState
@@ -32,6 +38,7 @@ import {
   addWordBoxToLineDocument,
   addWordBoxToDocument,
   insertWordBoxAfterToken,
+  LINE_SNAP_DISTANCE,
   moveLineWithCollisionConstraints,
   moveTokenWithCollisionConstraints,
   normalizeTokenLayout,
@@ -87,21 +94,16 @@ type Selection =
   | null;
 
 type InspectorTab = "selection" | "document" | "layers" | "lexicon";
-type PlacementMode = "word" | "line" | "textBlock" | "span";
+type TextPageObject = Exclude<PageObject, { kind: "image" }>;
+type TextPageObjectKind = TextPageObject["kind"];
+type InlineEditablePageObject = Extract<TextPageObject, { kind: "titleBlock" | "subtitleBlock" | "sectionBlock" }>;
+type PlacementMode = "word" | "line" | "image" | TextPageObjectKind | "span";
 
 type AssetUrls = Record<string, string>;
 
 type RecentDocument = {
   filePath: string;
   openedAt: string;
-};
-
-type DropPreview = {
-  pageId: string;
-  lineId: string;
-  x: number;
-  y: number;
-  height: number;
 };
 
 type MarginGuideEdge = "left" | "right" | "top" | "bottom";
@@ -182,14 +184,93 @@ const MIN_CONTENT_SIZE = 72;
 const LAYER_KIND_OPTIONS: LayerKind[] = ["literal", "concept", "translation", "syntax", "notes", "custom"];
 const RECENT_DOCUMENTS_STORAGE_KEY = "interlinear.recentDocuments.v1";
 const RECENT_DOCUMENT_LIMIT = 8;
-const DEFAULT_ZOOM = 1;
-const ZOOM_MIN = 0.5;
-const ZOOM_MAX = 2;
-const ZOOM_STEP = 0.1;
+const DEFAULT_ZOOM = 1.5;
+const ZOOM_MIN = DEFAULT_ZOOM * 0.5;
+const ZOOM_MAX = DEFAULT_ZOOM * 2;
+const ZOOM_STEP = DEFAULT_ZOOM * 0.1;
+const TEXT_PAGE_OBJECT_CONFIG: Record<
+  TextPageObjectKind,
+  {
+    className: string;
+    contentLabel: string;
+    defaultContent: string;
+    defaultHeight: number;
+    defaultWidth: number;
+    label: string;
+    placementLabel: string;
+    shortLabel: string;
+    constrainToMargins: boolean;
+  }
+> = {
+  textBlock: {
+    className: "body-text-block",
+    contentLabel: "Text",
+    defaultContent: "Independent text block",
+    defaultHeight: 105,
+    defaultWidth: 190,
+    label: "text block",
+    placementLabel: "Add text block",
+    shortLabel: "Text",
+    constrainToMargins: false
+  },
+  titleBlock: {
+    className: "title-block",
+    contentLabel: "Title",
+    defaultContent: "Title",
+    defaultHeight: 52,
+    defaultWidth: 420,
+    label: "title block",
+    placementLabel: "Add title block",
+    shortLabel: "Title",
+    constrainToMargins: true
+  },
+  subtitleBlock: {
+    className: "subtitle-block",
+    contentLabel: "Subtitle",
+    defaultContent: "Subtitle",
+    defaultHeight: 40,
+    defaultWidth: 380,
+    label: "subtitle block",
+    placementLabel: "Add subtitle block",
+    shortLabel: "Subtitle",
+    constrainToMargins: true
+  },
+  sectionBlock: {
+    className: "section-block",
+    contentLabel: "Section",
+    defaultContent: "Section",
+    defaultHeight: 36,
+    defaultWidth: 320,
+    label: "section block",
+    placementLabel: "Add section block",
+    shortLabel: "Section",
+    constrainToMargins: true
+  }
+};
 
 type AppProps = {
   initialDocument?: InterlinearDocument;
   initialLexicon?: Lexicon;
+};
+
+type ZoomAnchor = {
+  container: HTMLDivElement;
+  clientX: number;
+  clientY: number;
+  pageX: number;
+  pageY: number;
+};
+
+type MiddleButtonZoomState = {
+  startY: number;
+  startZoom: number;
+  anchor: ZoomAnchor | null;
+};
+
+type TokenInputFocusRestore = {
+  tokenId: string;
+  selectionStart: number | null;
+  selectionEnd: number | null;
 };
 
 export function App({ initialDocument, initialLexicon }: AppProps = {}) {
@@ -208,11 +289,13 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
   });
   const [editingTokenId, setEditingTokenId] = useState<string | null>(null);
   const [editingAnnotationId, setEditingAnnotationId] = useState<string | null>(null);
+  const [editingPageObjectId, setEditingPageObjectId] = useState<string | null>(null);
   const [placementMode, setPlacementMode] = useState<PlacementMode | null>(null);
   const [placementSticky, setPlacementSticky] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("selection");
   const [focusTokenId, setFocusTokenId] = useState<string | null>(null);
   const [focusAnnotationId, setFocusAnnotationId] = useState<string | null>(null);
+  const [focusPageObjectId, setFocusPageObjectId] = useState<string | null>(null);
   const [status, setStatus] = useState("Ready");
   const [exportErrorDetail, setExportErrorDetail] = useState("");
   const [fileErrorDetail, setFileErrorDetail] = useState("");
@@ -241,6 +324,9 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
   const dragRef = useRef<DragState | null>(null);
   const dragCommandStartRef = useRef<InterlinearDocument | null>(null);
   const measurementCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const pageScrollRef = useRef<HTMLDivElement | null>(null);
+  const middleButtonZoomRef = useRef<MiddleButtonZoomState | null>(null);
+  const tokenInputFocusRestoreRef = useRef<TokenInputFocusRestore | null>(null);
 
   const selectedToken = selection?.kind === "token" ? doc.tokens[selection.id] : null;
   const selectedSpan = selection?.kind === "span" ? doc.layerSpans[selection.id] : null;
@@ -267,8 +353,27 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
   const tokenSuggestions = selectedToken ? findTokenSuggestions(selectedToken, lexicon) : [];
   const lineSuggestions = selectedLine ? findLineSuggestions(doc, selectedLine.tokenIds, lexicon) : [];
   const suggestions = dedupeSuggestions([...tokenSuggestions, ...lineSuggestions]);
-  const dropPreview =
-    dragRef.current?.kind === "token" && dragRef.current.active ? getTokenDropPreview(doc, dragRef.current.id) : null;
+  const snapTargetLineId =
+    dragRef.current?.kind === "token" && dragRef.current.active ? getTokenSnapTargetLineId(doc, dragRef.current.id) : null;
+
+  useLayoutEffect(() => {
+    const restore = tokenInputFocusRestoreRef.current;
+    if (!restore) return;
+    if (editingTokenId !== restore.tokenId) {
+      tokenInputFocusRestoreRef.current = null;
+      return;
+    }
+
+    const input = document.querySelector<HTMLInputElement>(`[data-token-input="${restore.tokenId}"]`);
+    if (!input) return;
+
+    input.focus();
+    if (restore.selectionStart !== null && restore.selectionEnd !== null) {
+      const length = input.value.length;
+      input.setSelectionRange(Math.min(restore.selectionStart, length), Math.min(restore.selectionEnd, length));
+    }
+    tokenInputFocusRestoreRef.current = null;
+  }, [doc, editingTokenId]);
 
   useEffect(() => {
     if (!focusTokenId) return;
@@ -287,6 +392,15 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     input.select();
     setFocusAnnotationId(null);
   }, [doc, focusAnnotationId]);
+
+  useEffect(() => {
+    if (!focusPageObjectId) return;
+    const input = document.querySelector<HTMLInputElement>(`[data-page-object-input="${focusPageObjectId}"]`);
+    if (!input) return;
+    input.focus();
+    input.select();
+    setFocusPageObjectId(null);
+  }, [doc, focusPageObjectId]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -324,19 +438,33 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      if (event.defaultPrevented) return;
       const modifier = event.metaKey || event.ctrlKey;
-      if (!modifier || event.key.toLowerCase() !== "z") return;
-      event.preventDefault();
-      if (event.shiftKey) {
-        redoDocumentCommand();
-      } else {
-        undoDocumentCommand();
+      if (modifier && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        if (event.shiftKey) {
+          redoDocumentCommand();
+        } else {
+          undoDocumentCommand();
+        }
+        return;
+      }
+
+      if (
+        isDeleteSelectionShortcut(event) &&
+        !editingTokenId &&
+        !editingAnnotationId &&
+        !editingPageObjectId &&
+        !isWritableTextTarget(event.target) &&
+        deleteSelectedNode()
+      ) {
+        event.preventDefault();
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [doc, editingAnnotationId, editingPageObjectId, editingTokenId, selectedTokenIds, selection]);
 
   function updateDocument(updater: (current: InterlinearDocument) => InterlinearDocument, label?: string) {
     setDoc((current) => {
@@ -361,7 +489,9 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     setUndoStack((current) => {
       const command = current.at(-1);
       if (!command) return current;
-      setDoc(revertCommand(command));
+      const nextDoc = revertCommand(command);
+      setDoc(nextDoc);
+      void refreshAssetUrls(nextDoc, documentPath);
       setRedoStack((redo) => [...redo, command]);
       setStatus(`Undid ${command.label}.`);
       return current.slice(0, -1);
@@ -372,7 +502,9 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     setRedoStack((current) => {
       const command = current.at(-1);
       if (!command) return current;
-      setDoc(applyCommand(command));
+      const nextDoc = applyCommand(command);
+      setDoc(nextDoc);
+      void refreshAssetUrls(nextDoc, documentPath);
       setUndoStack((undo) => [...undo, command]);
       setStatus(`Redid ${command.label}.`);
       return current.slice(0, -1);
@@ -394,7 +526,9 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
       setSelectedTokenIds([]);
       setEditingTokenId(null);
       setEditingAnnotationId(null);
+      setEditingPageObjectId(null);
       setFocusAnnotationId(null);
+      setFocusPageObjectId(null);
       setPlacementMode(null);
       setPlacementSticky(false);
       setUndoStack([]);
@@ -427,6 +561,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
       rememberRecentDocument(result.filePath);
       setExportErrorDetail("");
       setFileErrorDetail("");
+      await refreshAssetUrls(result.document, result.filePath);
       setStatus(`Saved ${fileName(result.filePath)}`);
       return result.filePath;
     } catch (error) {
@@ -588,15 +723,18 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     }
   }
 
-  async function refreshAssetUrls(nextDoc: InterlinearDocument, nextDocumentPath: string) {
+  async function refreshAssetUrls(nextDoc: InterlinearDocument, nextDocumentPath: string | null) {
     if (!window.interlinear) return;
     const entries = await Promise.all(
       nextDoc.pages
         .flatMap((page) => page.pageObjects)
-        .filter((object): object is Extract<PageObject, { kind: "image" }> => object.kind === "image")
-        .map(async (object) => [object.id, await window.interlinear!.resolveAssetUrl(nextDocumentPath, object.assetPath)] as const)
+        .filter((object): object is Extract<PageObject, { kind: "image" }> => object.kind === "image" && Boolean(object.assetPath.trim()))
+        .map(async (object) => {
+          const assetUrl = await resolveImageAssetUrl(object.assetPath, nextDocumentPath);
+          return assetUrl ? ([object.id, assetUrl] as const) : null;
+        })
     );
-    setAssetUrls(Object.fromEntries(entries));
+    setAssetUrls(Object.fromEntries(entries.filter((entry): entry is readonly [string, string] => Boolean(entry))));
   }
 
   function createWordBox(pageId?: string, point?: { x: number; y: number }) {
@@ -608,6 +746,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     setSelectedTokenIds([tokenId]);
     setEditingTokenId(tokenId);
     setEditingAnnotationId(null);
+    setEditingPageObjectId(null);
     setInspectorTab("selection");
     setFocusTokenId(tokenId);
     setStatus("Created word box.");
@@ -621,6 +760,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     setSelectedTokenIds([nextTokenId]);
     setEditingTokenId(nextTokenId);
     setEditingAnnotationId(null);
+    setEditingPageObjectId(null);
     setInspectorTab("selection");
     setFocusTokenId(nextTokenId);
     setStatus("Created next word box.");
@@ -633,6 +773,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     setSelectedTokenIds([tokenId]);
     setEditingTokenId(tokenId);
     setEditingAnnotationId(null);
+    setEditingPageObjectId(null);
     setInspectorTab("selection");
     setFocusTokenId(tokenId);
     setStatus("Created word box.");
@@ -657,7 +798,41 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     setSelectedTokenIds([]);
     setEditingTokenId(null);
     setEditingAnnotationId(null);
+    setEditingPageObjectId(null);
     setStatus("Created line.");
+  }
+
+  function deleteSelectedNode(): boolean {
+    if (!selection || dragRef.current) return false;
+    const tokenIds =
+      selection.kind === "token"
+        ? selectedTokenIds.some((id) => doc.tokens[id])
+          ? selectedTokenIds.filter((id) => doc.tokens[id])
+          : [selection.id].filter((id) => doc.tokens[id])
+        : [];
+    if (!selectionExistsForDeletion(doc, selection, tokenIds)) return false;
+
+    updateDocument((current) => deleteSelectionFromDocument(current, selection, tokenIds), deleteSelectionCommandLabel(selection, tokenIds));
+    if (selection.kind === "pageObject") {
+      setAssetUrls((current) => {
+        if (!current[selection.id]) return current;
+        const next = { ...current };
+        delete next[selection.id];
+        return next;
+      });
+    }
+    setSelection(null);
+    setSelectedTokenIds([]);
+    setEditingTokenId(null);
+    setEditingAnnotationId(null);
+    setEditingPageObjectId(null);
+    setFocusTokenId(null);
+    setFocusAnnotationId(null);
+    setFocusPageObjectId(null);
+    setTokenOperationError("");
+    setSpanFormError("");
+    setStatus(deleteSelectionStatus(selection, tokenIds));
+    return true;
   }
 
   function togglePlacementMode(mode: PlacementMode) {
@@ -666,6 +841,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     setPlacementSticky(false);
     setEditingTokenId(null);
     setEditingAnnotationId(null);
+    setEditingPageObjectId(null);
   }
 
   function keepPlacementMode(mode: Extract<PlacementMode, "word" | "line">) {
@@ -673,10 +849,11 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     setPlacementSticky(true);
     setEditingTokenId(null);
     setEditingAnnotationId(null);
+    setEditingPageObjectId(null);
   }
 
   function completePlacement(mode: PlacementMode) {
-    if ((mode === "word" || mode === "line") && !placementSticky) {
+    if ((mode === "word" || mode === "line" || mode === "image" || isTextPageObjectKind(mode)) && !placementSticky) {
       setPlacementMode(null);
       setPlacementSticky(false);
     }
@@ -687,8 +864,10 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
       createWordBox(pageId, point);
     } else if (placementMode === "line") {
       createLine(pageId, point);
-    } else if (placementMode === "textBlock") {
-      addTextBlock(pageId, point);
+    } else if (placementMode === "image") {
+      addImage(pageId, point);
+    } else if (isTextPageObjectKind(placementMode)) {
+      addTextObject(placementMode, pageId, point);
     }
     if (placementMode) completePlacement(placementMode);
   }
@@ -698,8 +877,79 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     completePlacement("word");
   }
 
-  function adjustZoom(delta: number) {
-    setZoom((current) => round(clamp(current + delta, ZOOM_MIN, ZOOM_MAX)));
+  function setZoomTo(nextZoom: number, anchor?: ZoomAnchor | null) {
+    const boundedZoom = roundZoom(clamp(nextZoom, ZOOM_MIN, ZOOM_MAX));
+    setZoom((current) => {
+      if (current === boundedZoom) return current;
+      if (anchor) scheduleZoomAnchorRestore(anchor, boundedZoom);
+      return boundedZoom;
+    });
+  }
+
+  function adjustZoom(delta: number, anchor?: ZoomAnchor | null) {
+    setZoom((current) => {
+      const nextZoom = roundZoom(clamp(current + delta, ZOOM_MIN, ZOOM_MAX));
+      if (current === nextZoom) return current;
+      if (anchor) scheduleZoomAnchorRestore(anchor, nextZoom);
+      return nextZoom;
+    });
+  }
+
+  function resetZoom(anchor?: ZoomAnchor | null) {
+    setZoomTo(DEFAULT_ZOOM, anchor);
+  }
+
+  function captureZoomAnchor(clientX: number, clientY: number): ZoomAnchor | null {
+    const container = pageScrollRef.current;
+    const page = container?.querySelector<HTMLElement>(".page");
+    if (!container || !page) return null;
+    const rect = page.getBoundingClientRect();
+    return {
+      container,
+      clientX,
+      clientY,
+      pageX: (clientX - rect.left) / zoom,
+      pageY: (clientY - rect.top) / zoom
+    };
+  }
+
+  function handleZoomWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    const isPinchZoom = event.ctrlKey || event.metaKey;
+    const isMiddleButtonWheel = event.buttons === 4;
+    if ((!isPinchZoom && !isMiddleButtonWheel) || event.deltaY === 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const direction = event.deltaY < 0 ? 1 : -1;
+    const magnitude = DEFAULT_ZOOM * Math.min(0.08, Math.max(0.01, Math.abs(event.deltaY) / 600));
+    adjustZoom(direction * magnitude, captureZoomAnchor(event.clientX, event.clientY));
+  }
+
+  function startMiddleButtonZoom(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 1 && event.buttons !== 4) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const point = pointerClientPoint(event);
+    middleButtonZoomRef.current = {
+      startY: point.y,
+      startZoom: zoom,
+      anchor: captureZoomAnchor(point.x, point.y)
+    };
+    window.addEventListener("pointermove", handleMiddleButtonZoomMove);
+    window.addEventListener("pointerup", stopMiddleButtonZoom, { once: true });
+  }
+
+  function handleMiddleButtonZoomMove(event: PointerEvent) {
+    const state = middleButtonZoomRef.current;
+    if (!state) return;
+    event.preventDefault();
+    const point = pointerClientPoint(event);
+    const zoomDelta = ((state.startY - point.y) / 300) * DEFAULT_ZOOM;
+    setZoomTo(state.startZoom + zoomDelta, state.anchor);
+  }
+
+  function stopMiddleButtonZoom() {
+    middleButtonZoomRef.current = null;
+    window.removeEventListener("pointermove", handleMiddleButtonZoomMove);
   }
 
   function addLayer() {
@@ -744,7 +994,55 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     setStatus(`Added layer ${name}.`);
   }
 
-  function addTextBlock(pageId?: string, point?: { x: number; y: number }) {
+  function addTextObject(kind: TextPageObjectKind, pageId?: string, point?: { x: number; y: number }) {
+    const targetPageId = pageId ?? doc.pages[0]?.id;
+    if (!targetPageId) return;
+    const id = createId("obj");
+    const config = TEXT_PAGE_OBJECT_CONFIG[kind];
+    updateDocument(
+      (current) => ({
+        ...current,
+        pages: current.pages.map((page) =>
+          page.id === targetPageId
+            ? {
+                ...page,
+                pageObjects: [
+                  ...page.pageObjects,
+                  {
+                    id,
+                    kind,
+                    rect: sanitizePageObjectRect(
+                      {
+                        x: point?.x ?? current.pageSettings.marginLeft,
+                        y: point?.y ?? current.pageSettings.marginTop,
+                        width: config.defaultWidth,
+                        height: config.defaultHeight
+                      },
+                      current.pageSettings,
+                      config.constrainToMargins
+                    ),
+                    wrapMode: "rectangular",
+                    zIndex: 2,
+                    content: config.defaultContent,
+                    caption: "",
+                    metadata: {}
+                  }
+                ]
+              }
+            : page
+        )
+      }),
+      `Add ${config.label}`
+    );
+    setSelection({ kind: "pageObject", id });
+    setEditingTokenId(null);
+    setEditingAnnotationId(null);
+    setEditingPageObjectId(null);
+    setInspectorTab("selection");
+    setStatus(`Added ${config.label}.`);
+  }
+
+  function addImage(pageId?: string, point?: { x: number; y: number }) {
     const targetPageId = pageId ?? doc.pages[0]?.id;
     if (!targetPageId) return;
     const id = createId("obj");
@@ -759,59 +1057,20 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
                   ...page.pageObjects,
                   {
                     id,
-                    kind: "textBlock",
+                    kind: "image",
                     rect: sanitizePageObjectRect(
                       {
                         x: point?.x ?? current.pageSettings.marginLeft,
                         y: point?.y ?? current.pageSettings.marginTop,
-                        width: 190,
-                        height: 105
+                        width: 170,
+                        height: 120
                       },
-                      current.pageSettings
+                      current.pageSettings,
+                      true
                     ),
                     wrapMode: "rectangular",
                     zIndex: 2,
-                    content: "Independent text block",
-                    caption: "",
-                    metadata: {}
-                  }
-                ]
-              }
-            : page
-        )
-      }),
-      "Add text block"
-    );
-    setSelection({ kind: "pageObject", id });
-    setInspectorTab("selection");
-    setStatus("Added text block.");
-  }
-
-  async function addImage() {
-    if (!window.interlinear) {
-      setStatus("Image import requires Electron.");
-      return;
-    }
-
-    const imported = await window.interlinear.importImage(documentPath);
-    if (!imported) return;
-    const id = createId("obj");
-    updateDocument(
-      (current) => ({
-        ...current,
-        pages: current.pages.map((page, index) =>
-          index === 0
-            ? {
-                ...page,
-                pageObjects: [
-                  ...page.pageObjects,
-                  {
-                    id,
-                    kind: "image",
-                    rect: { x: 330, y: 300, width: 170, height: 120 },
-                    wrapMode: "rectangular",
-                    zIndex: 2,
-                    assetPath: imported.assetPath,
+                    assetPath: "",
                     caption: "",
                     metadata: {}
                   }
@@ -822,11 +1081,41 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
       }),
       "Add image"
     );
-    setAssetUrls((current) => ({ ...current, [id]: imported.absolutePath }));
-    const url = await window.interlinear.fileToAssetUrl(imported.absolutePath);
-    setAssetUrls((current) => ({ ...current, [id]: url }));
     setSelection({ kind: "pageObject", id });
-    setStatus(`Imported ${fileName(imported.assetPath)}.`);
+    setEditingTokenId(null);
+    setEditingAnnotationId(null);
+    setEditingPageObjectId(null);
+    setInspectorTab("selection");
+    setStatus("Added image box.");
+  }
+
+  async function chooseImageForObject(objectId: string) {
+    if (!window.interlinear) {
+      setStatus("Image selection requires Electron.");
+      return;
+    }
+    const imported = await window.interlinear.importImage(documentPath);
+    if (!imported) return;
+    updateDocument(
+      (current) => ({
+        ...current,
+        pages: current.pages.map((page) => ({
+          ...page,
+          pageObjects: page.pageObjects.map((object) =>
+            object.id === objectId && object.kind === "image" ? ({ ...object, assetPath: imported.assetPath } as PageObject) : object
+          )
+        }))
+      }),
+      "Choose image"
+    );
+    const url = await window.interlinear.fileToAssetUrl(imported.absolutePath);
+    setAssetUrls((current) => ({ ...current, [objectId]: url }));
+    setSelection({ kind: "pageObject", id: objectId });
+    setEditingTokenId(null);
+    setEditingAnnotationId(null);
+    setEditingPageObjectId(null);
+    setInspectorTab("selection");
+    setStatus(`Selected ${fileName(imported.assetPath)}.`);
   }
 
   function addConceptSpanFromSelection() {
@@ -974,7 +1263,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
           lexiconEntryId: lexiconEntryId ?? existing?.lexiconEntryId,
           offset: existing?.offset ?? { x: 0, y: 0 }
         };
-        return { ...current, annotationCells: { ...current.annotationCells, [id]: nextCell } };
+        return normalizeTokenLayout({ ...current, annotationCells: { ...current.annotationCells, [id]: nextCell } }, tokenId);
       },
       "Edit annotation"
     );
@@ -992,15 +1281,16 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
         if (!text.trim()) {
           const annotationCells = { ...current.annotationCells };
           delete annotationCells[annotationId];
-          return { ...current, annotationCells };
+          return existing.spanId ? { ...current, annotationCells } : normalizeTokenLayout({ ...current, annotationCells }, existing.tokenId);
         }
-        return {
+        const next = {
           ...current,
           annotationCells: {
             ...current.annotationCells,
             [annotationId]: { ...existing, text }
           }
         };
+        return existing.spanId ? next : normalizeTokenLayout(next, existing.tokenId);
       },
       "Edit annotation"
     );
@@ -1020,6 +1310,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
       setSelection({ kind: "annotation", id: existing.id });
       setEditingTokenId(null);
       setEditingAnnotationId(existing.id);
+      setEditingPageObjectId(null);
       setFocusAnnotationId(existing.id);
       setInspectorTab("selection");
       setStatus("Focused existing annotation.");
@@ -1051,6 +1342,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     setSelection({ kind: "annotation", id });
     setEditingTokenId(null);
     setEditingAnnotationId(id);
+    setEditingPageObjectId(null);
     setFocusAnnotationId(id);
     setInspectorTab("selection");
     setStatus(`Added ${placement} annotation.`);
@@ -1071,6 +1363,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
       setSelection({ kind: "annotation", id: existing.id });
       setEditingTokenId(null);
       setEditingAnnotationId(existing.id);
+      setEditingPageObjectId(null);
       setFocusAnnotationId(existing.id);
       setInspectorTab("selection");
       setStatus("Focused existing span annotation.");
@@ -1103,12 +1396,14 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     setSelection({ kind: "annotation", id });
     setEditingTokenId(null);
     setEditingAnnotationId(id);
+    setEditingPageObjectId(null);
     setFocusAnnotationId(id);
     setInspectorTab("selection");
     setStatus(`Added ${placement} span annotation.`);
   }
 
-  function updateToken(tokenId: string, patch: Partial<Token>) {
+  function updateToken(tokenId: string, patch: Partial<Token>, focusRestore?: TokenInputFocusRestore) {
+    if (focusRestore) tokenInputFocusRestoreRef.current = focusRestore;
     updateDocument(
       (current) => {
         const token = current.tokens[tokenId];
@@ -1176,6 +1471,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     setSelectedTokenIds([selectedToken.id]);
     setEditingTokenId(selectedToken.id);
     setEditingAnnotationId(null);
+    setEditingPageObjectId(null);
     setFocusTokenId(selectedToken.id);
     setTokenOperationError("");
     setStatus("Split token.");
@@ -1198,6 +1494,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     setSelectedTokenIds([mergedTokenId]);
     setEditingTokenId(mergedTokenId);
     setEditingAnnotationId(null);
+    setEditingPageObjectId(null);
     setFocusTokenId(mergedTokenId);
     setTokenOperationError("");
     setStatus("Merged tokens.");
@@ -1209,18 +1506,32 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
         ...current,
         pages: current.pages.map((page) => ({
           ...page,
-          pageObjects: page.pageObjects.map((object) =>
-            object.id === objectId
-              ? ({
-                  ...object,
-                  ...patch,
-                  rect: patch.rect ? sanitizePageObjectRect(patch.rect, current.pageSettings) : object.rect
-                } as PageObject)
-              : object
-          )
+          pageObjects: page.pageObjects.map((object) => {
+            if (object.id !== objectId) return object;
+            const nextObject = { ...object, ...patch } as PageObject;
+            return {
+              ...nextObject,
+              rect: patch.rect ? sanitizeRectForPageObject(nextObject, patch.rect, current.pageSettings) : nextObject.rect
+            } as PageObject;
+          })
         }))
       }),
       patch.rect ? "Edit page object" : "Edit page object"
+    );
+  }
+
+  function updatePageObjectText(objectId: string, content: string) {
+    updateDocument(
+      (current) => ({
+        ...current,
+        pages: current.pages.map((page) => ({
+          ...page,
+          pageObjects: page.pageObjects.map((object) =>
+            object.id === objectId && isTextPageObject(object) ? { ...object, content } : object
+          )
+        }))
+      }),
+      "Edit page object"
     );
   }
 
@@ -1231,7 +1542,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
         pages: current.pages.map((page) => ({
           ...page,
           pageObjects: page.pageObjects.map((object) =>
-            object.id === objectId ? ({ ...object, rect: sanitizePageObjectRect(rect, current.pageSettings) } as PageObject) : object
+            object.id === objectId ? ({ ...object, rect: sanitizeRectForPageObject(object, rect, current.pageSettings) } as PageObject) : object
           )
         }))
       }),
@@ -1279,16 +1590,6 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     );
   }
 
-  function toggleAnnotationHandles() {
-    updateDocument(
-      (current) => ({
-        ...current,
-        annotationHandlesVisible: !current.annotationHandlesVisible
-      }),
-      "Toggle annotation handles"
-    );
-  }
-
   function startDrag(kind: DragStartKind, id: string, event: ReactPointerEvent<HTMLElement>) {
     const point = pointerClientPoint(event);
     event.stopPropagation();
@@ -1303,6 +1604,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
       }
       setEditingTokenId((current) => (current === id ? current : null));
       setEditingAnnotationId(null);
+      setEditingPageObjectId(null);
       setSelection({ kind, id });
       dragRef.current = {
         kind,
@@ -1318,6 +1620,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
       if (!line) return;
       setEditingTokenId(null);
       setEditingAnnotationId(null);
+      setEditingPageObjectId(null);
       setSelection({ kind, id });
       dragRef.current = {
         kind,
@@ -1332,6 +1635,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
       if (!cell) return;
       setEditingTokenId(null);
       setEditingAnnotationId((current) => (current === id ? current : null));
+      setEditingPageObjectId(null);
       setSelection({ kind, id });
       dragRef.current = {
         kind,
@@ -1346,6 +1650,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
       if (!span) return;
       setEditingTokenId(null);
       setEditingAnnotationId(null);
+      setEditingPageObjectId(null);
       setSelection({ kind, id });
       dragRef.current = {
         kind,
@@ -1365,6 +1670,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
       if (!object) return;
       setEditingTokenId(null);
       setEditingAnnotationId(null);
+      setEditingPageObjectId((current) => (current === id ? current : null));
       setSelection({ kind, id });
       dragRef.current = {
         kind,
@@ -1377,6 +1683,9 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
       event.preventDefault();
       const edge = marginGuideEdge(id);
       if (!edge) return;
+      setEditingTokenId(null);
+      setEditingAnnotationId(null);
+      setEditingPageObjectId(null);
       dragRef.current = {
         kind,
         id: edge,
@@ -1412,6 +1721,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     if (!object) return;
     setEditingTokenId(null);
     setEditingAnnotationId(null);
+    setEditingPageObjectId(null);
     setSelection({ kind: "pageObject", id: objectId });
     dragRef.current = {
       kind: "pageObjectResize",
@@ -1476,17 +1786,26 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
           ...page,
           pageObjects: page.pageObjects.map((object) =>
             object.id === drag.id
-              ? {
+              ? ({
                   ...object,
-                  rect: { ...object.rect, x: drag.original.x + dx, y: drag.original.y + dy }
-                }
+                  rect: sanitizeRectForPageObject(
+                    object,
+                    { ...object.rect, x: drag.original.x + dx, y: drag.original.y + dy },
+                    current.pageSettings
+                  )
+                } as PageObject)
               : object
           )
         }))
       }));
     } else if (drag.kind === "pageObjectResize") {
       event.preventDefault();
-      updatePageObjectRect(drag.id, resizePageObjectRect(drag.original, drag.handle, dx, dy, doc.pageSettings), false);
+      const object = doc.pages.flatMap((page) => page.pageObjects).find((item) => item.id === drag.id);
+      updatePageObjectRect(
+        drag.id,
+        resizePageObjectRect(drag.original, drag.handle, dx, dy, doc.pageSettings, object ? pageObjectConstrainedToMargins(object) : false),
+        false
+      );
     } else if (drag.kind === "marginGuide") {
       event.preventDefault();
       updatePageSettings(marginPatchForDrag(drag.id, drag.original, dx, dy), false);
@@ -1513,8 +1832,8 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     window.removeEventListener("pointermove", handlePointerMove);
   }
 
-  function stopTokenEditOnOutsidePointerDown(event: ReactPointerEvent<HTMLElement>) {
-    if (!editingTokenId && !editingAnnotationId) return;
+  function stopInlineEditOnOutsidePointerDown(event: ReactPointerEvent<HTMLElement>) {
+    if (!editingTokenId && !editingAnnotationId && !editingPageObjectId) return;
     const target = event.target instanceof HTMLElement ? event.target : null;
     if (editingTokenId) {
       const wordBox = target?.closest<HTMLElement>(".word-box");
@@ -1526,6 +1845,28 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
       if (annotationBox?.dataset.annotationId === editingAnnotationId) return;
       setEditingAnnotationId(null);
     }
+    if (editingPageObjectId) {
+      const pageObject = target?.closest<HTMLElement>(".page-object");
+      if (pageObject?.dataset.pageObjectId === editingPageObjectId) return;
+      setEditingPageObjectId(null);
+    }
+  }
+
+  function stopTokenEditAfterBlur(tokenId: string, relatedTarget: EventTarget | null) {
+    const relatedElement = relatedTarget instanceof HTMLElement ? relatedTarget : null;
+    const relatedWordBox = relatedElement?.closest<HTMLElement>(".word-box");
+    if (relatedWordBox?.dataset.tokenId === tokenId) return;
+
+    const schedule =
+      typeof window !== "undefined" && typeof window.requestAnimationFrame === "function"
+        ? (callback: FrameRequestCallback) => window.requestAnimationFrame(callback)
+        : (callback: FrameRequestCallback) => window.setTimeout(callback, 0);
+    schedule(() => {
+      const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      const activeWordBox = activeElement?.closest<HTMLElement>(".word-box");
+      if (activeWordBox?.dataset.tokenId === tokenId) return;
+      setEditingTokenId((current) => (current === tokenId ? null : current));
+    });
   }
 
   const wordPlacementTooltip =
@@ -1542,7 +1883,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
       : "Click once to place one line; double-click to keep placing lines.";
 
   return (
-    <div className="app" onPointerDownCapture={stopTokenEditOnOutsidePointerDown}>
+    <div className="app" onPointerDownCapture={stopInlineEditOnOutsidePointerDown}>
       <main className="workspace">
         <header className="ribbon">
           <RibbonGroup label="Document">
@@ -1634,18 +1975,6 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
               pressed={doc.lineGuidesVisible}
             />
             <IconButton
-              label={doc.annotationHandlesVisible ? "Hide annotation handles" : "Show annotation handles"}
-              shortLabel="Handles"
-              tooltip={
-                doc.annotationHandlesVisible
-                  ? "Hide source-linked annotation handles."
-                  : "Show controls for adding annotations above or below source words."
-              }
-              onClick={toggleAnnotationHandles}
-              icon={doc.annotationHandlesVisible ? <EyeOff size={18} /> : <Eye size={18} />}
-              pressed={doc.annotationHandlesVisible}
-            />
-            <IconButton
               label="Add concept span"
               shortLabel="Span"
               tooltip={placementMode === "span" ? "Turn off span selection mode." : "Turn on span selection mode, then click words."}
@@ -1656,9 +1985,48 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
             <IconButton
               label="Add image"
               shortLabel="Image"
-              tooltip="Place an image on the page."
-              onClick={() => void addImage()}
+              tooltip={
+                placementMode === "image" ? "Turn off image placement mode." : "Turn on image placement mode, then click the page."
+              }
+              onClick={() => togglePlacementMode("image")}
               icon={<ImagePlus size={18} />}
+              pressed={placementMode === "image"}
+            />
+            <IconButton
+              label="Add title block"
+              shortLabel="Title"
+              tooltip={
+                placementMode === "titleBlock"
+                  ? "Turn off title block placement mode."
+                  : "Turn on title block placement mode, then click the page."
+              }
+              onClick={() => togglePlacementMode("titleBlock")}
+              icon={<Heading1 size={18} />}
+              pressed={placementMode === "titleBlock"}
+            />
+            <IconButton
+              label="Add subtitle block"
+              shortLabel="Subtitle"
+              tooltip={
+                placementMode === "subtitleBlock"
+                  ? "Turn off subtitle block placement mode."
+                  : "Turn on subtitle block placement mode, then click the page."
+              }
+              onClick={() => togglePlacementMode("subtitleBlock")}
+              icon={<Heading2 size={18} />}
+              pressed={placementMode === "subtitleBlock"}
+            />
+            <IconButton
+              label="Add section block"
+              shortLabel="Section"
+              tooltip={
+                placementMode === "sectionBlock"
+                  ? "Turn off section block placement mode."
+                  : "Turn on section block placement mode, then click the page."
+              }
+              onClick={() => togglePlacementMode("sectionBlock")}
+              icon={<Heading3 size={18} />}
+              pressed={placementMode === "sectionBlock"}
             />
             <IconButton
               label="Add text block"
@@ -1730,8 +2098,16 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
               disabled={zoom <= ZOOM_MIN}
             />
             <span className="zoom-value" aria-label="Zoom level">
-              {Math.round(zoom * 100)}%
+              {formatZoomPercent(zoom)}%
             </span>
+            <IconButton
+              label="Reset zoom"
+              shortLabel="Reset"
+              tooltip="Return the page view to 100%."
+              onClick={() => resetZoom()}
+              icon={<RotateCcw size={18} />}
+              disabled={zoom === DEFAULT_ZOOM}
+            />
             <IconButton
               label="Zoom in"
               shortLabel="In"
@@ -1759,7 +2135,12 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
         </header>
 
         <div className="editor-shell">
-          <div className="page-scroll">
+          <div
+            className="page-scroll"
+            ref={pageScrollRef}
+            onPointerDownCapture={startMiddleButtonZoom}
+            onWheel={handleZoomWheel}
+          >
             {doc.pages.map((page) => (
               <PageView
                 key={page.id}
@@ -1769,15 +2150,17 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
                 selectedTokenIds={selectedTokenIds}
                 editingTokenId={editingTokenId}
                 editingAnnotationId={editingAnnotationId}
+                editingPageObjectId={editingPageObjectId}
                 placementMode={placementMode}
                 selection={selection}
-                dropPreview={dropPreview}
+                snapTargetLineId={snapTargetLineId}
                 zoom={zoom}
                 assetUrls={assetUrls}
                 onStartDrag={startDrag}
                 onStartPageObjectResize={startPageObjectResize}
                 onTokenChange={updateToken}
                 onAnnotationTextChange={updateAnnotationText}
+                onPageObjectTextChange={updatePageObjectText}
                 onCreateWordAfterToken={createWordBoxAfterToken}
                 onPlaceOnPage={placeOnPage}
                 onPlaceWordOnLine={placeWordOnLine}
@@ -1786,6 +2169,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
                 onSelectToken={(tokenId, additive) => {
                   setEditingTokenId((current) => (current === tokenId ? current : null));
                   setEditingAnnotationId(null);
+                  setEditingPageObjectId(null);
                   setSelection({ kind: "token", id: tokenId });
                   setSelectedTokenIds((current) =>
                     additive ? (current.includes(tokenId) ? current.filter((id) => id !== tokenId) : [...current, tokenId]) : [tokenId]
@@ -1797,27 +2181,41 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
                   setSelectedTokenIds([tokenId]);
                   setEditingTokenId(tokenId);
                   setEditingAnnotationId(null);
+                  setEditingPageObjectId(null);
                   setInspectorTab("selection");
                   setFocusTokenId(tokenId);
                 }}
+                onTokenInputBlur={stopTokenEditAfterBlur}
                 onStopTokenEdit={() => setEditingTokenId(null)}
                 onSelectAnnotation={(annotationId) => {
                   setEditingTokenId(null);
                   setEditingAnnotationId((current) => (current === annotationId ? current : null));
+                  setEditingPageObjectId(null);
                   setSelection({ kind: "annotation", id: annotationId });
                   setInspectorTab("selection");
                 }}
                 onEditAnnotation={(annotationId) => {
                   setEditingTokenId(null);
+                  setEditingPageObjectId(null);
                   setSelection({ kind: "annotation", id: annotationId });
                   setEditingAnnotationId(annotationId);
                   setInspectorTab("selection");
                   setFocusAnnotationId(annotationId);
                 }}
                 onStopAnnotationEdit={() => setEditingAnnotationId(null)}
+                onEditPageObject={(objectId) => {
+                  setEditingTokenId(null);
+                  setEditingAnnotationId(null);
+                  setSelection({ kind: "pageObject", id: objectId });
+                  setEditingPageObjectId(objectId);
+                  setInspectorTab("selection");
+                  setFocusPageObjectId(objectId);
+                }}
+                onStopPageObjectEdit={() => setEditingPageObjectId(null)}
                 onSelect={(nextSelection) => {
                   setEditingTokenId(null);
                   setEditingAnnotationId(null);
+                  setEditingPageObjectId(null);
                   setSelection(nextSelection);
                 }}
               />
@@ -1863,6 +2261,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
             onLexiconEntryDelete={deleteLexiconEntry}
             onOpenRecentDocument={(filePath) => void openDocument(filePath)}
             onRemoveRecentDocument={forgetRecentDocument}
+            onChooseImage={chooseImageForObject}
             onPageObjectChange={updatePageObject}
             onPageObjectRectChange={updatePageObjectRect}
             onDocumentChange={(patch) => updateDocument((current) => ({ ...current, ...patch }), "Edit document")}
@@ -1892,15 +2291,17 @@ function PageView({
   selectedTokenIds,
   editingTokenId,
   editingAnnotationId,
+  editingPageObjectId,
   placementMode,
   selection,
-  dropPreview,
+  snapTargetLineId,
   zoom,
   assetUrls,
   onStartDrag,
   onStartPageObjectResize,
   onTokenChange,
   onAnnotationTextChange,
+  onPageObjectTextChange,
   onCreateWordAfterToken,
   onPlaceOnPage,
   onPlaceWordOnLine,
@@ -1908,10 +2309,13 @@ function PageView({
   onCreateSpanAnnotation,
   onSelectToken,
   onEditToken,
+  onTokenInputBlur,
   onStopTokenEdit,
   onSelectAnnotation,
   onEditAnnotation,
   onStopAnnotationEdit,
+  onEditPageObject,
+  onStopPageObjectEdit,
   onSelect
 }: {
   page: Page;
@@ -1920,9 +2324,10 @@ function PageView({
   selectedTokenIds: string[];
   editingTokenId: string | null;
   editingAnnotationId: string | null;
+  editingPageObjectId: string | null;
   placementMode: PlacementMode | null;
   selection: Selection;
-  dropPreview: DropPreview | null;
+  snapTargetLineId: string | null;
   zoom: number;
   assetUrls: AssetUrls;
   onStartDrag: (kind: DragStartKind, id: string, event: ReactPointerEvent<HTMLElement>) => void;
@@ -1931,8 +2336,9 @@ function PageView({
     handle: PageObjectResizeHandle,
     event: ReactPointerEvent<HTMLElement>
   ) => void;
-  onTokenChange: (tokenId: string, patch: Partial<Token>) => void;
+  onTokenChange: (tokenId: string, patch: Partial<Token>, focusRestore?: TokenInputFocusRestore) => void;
   onAnnotationTextChange: (annotationId: string, text: string) => void;
+  onPageObjectTextChange: (objectId: string, content: string) => void;
   onCreateWordAfterToken: (tokenId: string) => void;
   onPlaceOnPage: (pageId: string, point: { x: number; y: number }) => void;
   onPlaceWordOnLine: (pageId: string, lineId: string, x: number) => void;
@@ -1940,10 +2346,13 @@ function PageView({
   onCreateSpanAnnotation: (spanId: string, placement: AnnotationPlacement) => void;
   onSelectToken: (tokenId: string, additive: boolean) => void;
   onEditToken: (tokenId: string) => void;
+  onTokenInputBlur: (tokenId: string, relatedTarget: EventTarget | null) => void;
   onStopTokenEdit: () => void;
   onSelectAnnotation: (annotationId: string) => void;
   onEditAnnotation: (annotationId: string) => void;
   onStopAnnotationEdit: () => void;
+  onEditPageObject: (objectId: string) => void;
+  onStopPageObjectEdit: () => void;
   onSelect: (selection: Selection) => void;
 }) {
   function handlePageClick(event: ReactMouseEvent<HTMLDivElement>) {
@@ -1960,7 +2369,7 @@ function PageView({
       }}
     >
       <div
-        className={placementMode ? `page placement-mode-${placementMode}` : "page"}
+        className={pageClassName(placementMode, doc.lineGuidesVisible)}
         style={{
           width: doc.pageSettings.width,
           height: doc.pageSettings.height,
@@ -1979,20 +2388,30 @@ function PageView({
               key={object.id}
               object={object}
               assetUrl={object.kind === "image" ? assetUrls[object.id] : undefined}
+              guidesVisible={doc.lineGuidesVisible}
               selected={selection?.kind === "pageObject" && selection.id === object.id}
+              editing={editingPageObjectId === object.id}
               onStartDrag={onStartDrag}
               onStartResize={onStartPageObjectResize}
+              onEdit={onEditPageObject}
+              onStopEdit={onStopPageObjectEdit}
+              onTextChange={onPageObjectTextChange}
               onSelect={onSelect}
             />
           ))}
         {page.lines.map((line) => {
           const routed = routeLine(doc, page, line);
           const lineBoxHeight = sourceLineBoxHeight(doc.pageSettings);
+          const selected = selection?.kind === "line" && selection.id === line.id;
+          const snapTarget = snapTargetLineId === line.id;
           return (
-            <div key={line.id} className="line-layer">
+            <div key={line.id} className={lineLayerClassName({ selected, snapTarget })}>
               {doc.lineGuidesVisible ? (
                 <button
-                  className={selection?.kind === "line" && selection.id === line.id ? "line-guide selected" : "line-guide"}
+                  className={lineGuideClassName({
+                    selected,
+                    snapTarget
+                  })}
                   style={{
                     left: doc.pageSettings.marginLeft,
                     top: routed.y,
@@ -2022,7 +2441,7 @@ function PageView({
                     <div
                       className="routing-band"
                       key={`${line.id}-${index}`}
-                      style={{ left: band.x, top: band.y, width: band.width, height: band.height }}
+                      style={{ left: band.x, top: band.y, width: band.width, height: lineBoxHeight }}
                     />
                   ))
                 : null}
@@ -2075,11 +2494,21 @@ function PageView({
                         }
                       }}
                       onFocus={() => onSelectToken(token.id, false)}
-                      onBlur={() => {
-                        if (isEditing) onStopTokenEdit();
+                      onBlur={(event) => {
+                        if (isEditing) onTokenInputBlur(token.id, event.relatedTarget);
                       }}
                       onChange={(event) => {
-                        if (isEditing) onTokenChange(token.id, { text: event.target.value });
+                        if (isEditing) {
+                          onTokenChange(
+                            token.id,
+                            { text: event.currentTarget.value },
+                            {
+                              tokenId: token.id,
+                              selectionStart: event.currentTarget.selectionStart,
+                              selectionEnd: event.currentTarget.selectionEnd
+                            }
+                          );
+                        }
                       }}
                       onKeyDown={(event) => {
                         if (!isEditing || event.nativeEvent.isComposing) return;
@@ -2102,7 +2531,7 @@ function PageView({
                   </div>
                 );
               })}
-              {doc.annotationHandlesVisible
+              {doc.lineGuidesVisible
                 ? routed.positionedTokens.map((positioned) => {
                     const token = doc.tokens[positioned.tokenId];
                     if (!token) return null;
@@ -2171,7 +2600,7 @@ function PageView({
               >
                 {span.text}
               </button>
-              {doc.annotationHandlesVisible ? (
+              {doc.lineGuidesVisible ? (
                 <AnnotationHandlePair
                   rect={rect}
                   label={span.text || "concept span"}
@@ -2198,13 +2627,6 @@ function PageView({
             </Fragment>
           );
         })}
-        {dropPreview?.pageId === page.id ? (
-          <div
-            className="drop-slot"
-            style={{ left: dropPreview.x, top: dropPreview.y, height: dropPreview.height }}
-            aria-hidden="true"
-          />
-        ) : null}
       </div>
     </div>
   );
@@ -2408,23 +2830,43 @@ function AnnotationWordBox({
 function PageObjectView({
   object,
   assetUrl,
+  guidesVisible,
   selected,
+  editing,
   onStartDrag,
   onStartResize,
+  onEdit,
+  onStopEdit,
+  onTextChange,
   onSelect
 }: {
   object: PageObject;
   assetUrl?: string;
+  guidesVisible: boolean;
   selected: boolean;
+  editing: boolean;
   onStartDrag: (kind: DragStartKind, id: string, event: ReactPointerEvent<HTMLElement>) => void;
   onStartResize: (objectId: string, handle: PageObjectResizeHandle, event: ReactPointerEvent<HTMLElement>) => void;
+  onEdit: (objectId: string) => void;
+  onStopEdit: () => void;
+  onTextChange: (objectId: string, content: string) => void;
   onSelect: (selection: Selection) => void;
 }) {
   const resizeHandles: PageObjectResizeHandle[] = ["nw", "ne", "sw", "se"];
+  const editingInlineText = editing && isInlineEditablePageObject(object);
+  const showResizeHandles = selected && !editingInlineText && (guidesVisible || !isTextPageObject(object));
+
+  function editPageObjectText(event: ReactMouseEvent<HTMLDivElement>) {
+    if (!isInlineEditablePageObject(object)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onEdit(object.id);
+  }
 
   return (
     <div
-      className={selected ? "page-object selected" : "page-object"}
+      data-page-object-id={object.id}
+      className={pageObjectClassName(object, selected, editingInlineText)}
       style={{
         left: object.rect.x,
         top: object.rect.y,
@@ -2434,18 +2876,41 @@ function PageObjectView({
       }}
       onPointerDown={(event) => onStartDrag("pageObject", object.id, event)}
       onClick={() => onSelect({ kind: "pageObject", id: object.id })}
+      onDoubleClick={editPageObjectText}
     >
       {object.kind === "image" ? (
         assetUrl ? (
-          <img src={assetUrl} alt={object.caption ?? "Page image"} />
+          <img src={assetUrl} alt={object.caption || "Page image"} />
         ) : (
           <div className="asset-missing">Image</div>
         )
+      ) : editingInlineText ? (
+        <input
+          className={`${textPageObjectClassName(object.kind)} page-object-text-input`}
+          aria-label={`${TEXT_PAGE_OBJECT_CONFIG[object.kind].contentLabel} block text`}
+          data-page-object-input={object.id}
+          value={object.content}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+          onDoubleClick={(event) => event.stopPropagation()}
+          onBlur={onStopEdit}
+          onChange={(event) => onTextChange(object.id, event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing) return;
+            const isPlainEnter = event.key === "Enter" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey;
+            if (isPlainEnter) {
+              event.preventDefault();
+              onStopEdit();
+              event.currentTarget.blur();
+            }
+          }}
+          title="Edit page object text"
+        />
       ) : (
-        <div className="text-block">{object.content}</div>
+        <div className={textPageObjectClassName(object.kind)}>{object.content}</div>
       )}
       {object.caption ? <div className="object-caption">{object.caption}</div> : null}
-      {selected
+      {showResizeHandles
         ? resizeHandles.map((handle) => (
             <button
               key={handle}
@@ -2500,6 +2965,7 @@ function Inspector({
   onLexiconEntryDelete,
   onOpenRecentDocument,
   onRemoveRecentDocument,
+  onChooseImage,
   onPageObjectChange,
   onPageObjectRectChange,
   onDocumentChange,
@@ -2555,6 +3021,7 @@ function Inspector({
   onLexiconEntryDelete: (entryId: string) => void;
   onOpenRecentDocument: (filePath: string) => void;
   onRemoveRecentDocument: (filePath: string) => void;
+  onChooseImage: (objectId: string) => void | Promise<void>;
   onPageObjectChange: (objectId: string, patch: Partial<PageObject>) => void;
   onPageObjectRectChange: (objectId: string, rect: Rect) => void;
   onDocumentChange: (patch: Partial<InterlinearDocument>) => void;
@@ -2743,15 +3210,23 @@ function Inspector({
               onChange={(event) => onPageObjectChange(pageObject.id, { caption: event.target.value })}
             />
           </label>
-          {pageObject.kind === "textBlock" ? (
+          {isTextPageObject(pageObject) ? (
             <label>
-              Text
+              {TEXT_PAGE_OBJECT_CONFIG[pageObject.kind].contentLabel}
               <textarea
                 value={pageObject.content}
                 onChange={(event) => onPageObjectChange(pageObject.id, { content: event.target.value })}
                 rows={6}
               />
             </label>
+          ) : null}
+          {pageObject.kind === "image" ? (
+            <div className="image-source-controls">
+              <button className="command" onClick={() => void onChooseImage(pageObject.id)}>
+                Choose image file
+              </button>
+              <div className="asset-path">{pageObject.assetPath ? fileName(pageObject.assetPath) : "No image selected"}</div>
+            </div>
           ) : null}
         </div>
       ) : null}
@@ -3424,6 +3899,166 @@ function selectedTokensAreAdjacent(doc: InterlinearDocument, tokenIds: string[])
   return indexes.every((index) => index >= 0) && indexes.every((index, offset) => offset === 0 || index === indexes[offset - 1] + 1);
 }
 
+function selectionExistsForDeletion(doc: InterlinearDocument, selection: NonNullable<Selection>, tokenIds: string[]): boolean {
+  if (selection.kind === "token") return tokenIds.some((id) => Boolean(doc.tokens[id]));
+  if (selection.kind === "line") return doc.pages.some((page) => page.lines.some((line) => line.id === selection.id));
+  if (selection.kind === "span") return Boolean(doc.layerSpans[selection.id]);
+  if (selection.kind === "annotation") return Boolean(doc.annotationCells[selection.id]);
+  return doc.pages.some((page) => page.pageObjects.some((object) => object.id === selection.id));
+}
+
+function deleteSelectionFromDocument(
+  doc: InterlinearDocument,
+  selection: NonNullable<Selection>,
+  tokenIds: string[]
+): InterlinearDocument {
+  if (selection.kind === "token") return deleteTokensFromDocument(doc, tokenIds);
+  if (selection.kind === "line") {
+    const line = doc.pages.flatMap((page) => page.lines).find((candidate) => candidate.id === selection.id);
+    const withoutTokens = deleteTokensFromDocument(doc, line?.tokenIds ?? []);
+    return {
+      ...withoutTokens,
+      pages: withoutTokens.pages.map((page) => ({
+        ...page,
+        lines: page.lines.filter((candidate) => candidate.id !== selection.id)
+      }))
+    };
+  }
+  if (selection.kind === "span") return deleteSpansFromDocument(doc, new Set([selection.id]));
+  if (selection.kind === "annotation") {
+    if (!doc.annotationCells[selection.id]) return doc;
+    const annotationCells = { ...doc.annotationCells };
+    delete annotationCells[selection.id];
+    return { ...doc, annotationCells };
+  }
+  return {
+    ...doc,
+    pages: doc.pages.map((page) => ({
+      ...page,
+      pageObjects: page.pageObjects.filter((object) => object.id !== selection.id)
+    }))
+  };
+}
+
+function deleteTokensFromDocument(doc: InterlinearDocument, tokenIds: string[]): InterlinearDocument {
+  const deletedTokenIds = new Set(tokenIds.filter((id) => Boolean(doc.tokens[id])));
+  if (deletedTokenIds.size === 0) return doc;
+
+  const deletedSpanIds = spanIdsTouchingTokens(doc, deletedTokenIds);
+  const tokens = { ...doc.tokens };
+  for (const tokenId of deletedTokenIds) {
+    delete tokens[tokenId];
+  }
+  const withoutSpans = deleteSpansFromDocument(
+    {
+      ...doc,
+      tokens,
+      pages: doc.pages.map((page) => ({
+        ...page,
+        lines: page.lines.map((line) => ({
+          ...line,
+          tokenIds: line.tokenIds.filter((tokenId) => !deletedTokenIds.has(tokenId))
+        }))
+      }))
+    },
+    deletedSpanIds
+  );
+  return {
+    ...withoutSpans,
+    annotationCells: Object.fromEntries(
+      Object.entries(withoutSpans.annotationCells).filter(([, cell]) => !deletedTokenIds.has(cell.tokenId))
+    )
+  };
+}
+
+function deleteSpansFromDocument(doc: InterlinearDocument, spanIds: Set<string>): InterlinearDocument {
+  if (spanIds.size === 0) return doc;
+  return {
+    ...doc,
+    layerSpans: Object.fromEntries(Object.entries(doc.layerSpans).filter(([id]) => !spanIds.has(id))),
+    annotationCells: Object.fromEntries(
+      Object.entries(doc.annotationCells).filter(([, cell]) => !cell.spanId || !spanIds.has(cell.spanId))
+    )
+  };
+}
+
+function spanIdsTouchingTokens(doc: InterlinearDocument, deletedTokenIds: Set<string>): Set<string> {
+  const orderedTokens = tokenOrder(doc);
+  const deletedIndexes = new Set([...deletedTokenIds].map((id) => orderedTokens.indexOf(id)).filter((index) => index >= 0));
+  const spanIds = new Set<string>();
+  for (const span of Object.values(doc.layerSpans)) {
+    const startIndex = orderedTokens.indexOf(span.startTokenId);
+    const endIndex = orderedTokens.indexOf(span.endTokenId);
+    if (startIndex < 0 || endIndex < 0) continue;
+    const left = Math.min(startIndex, endIndex);
+    const right = Math.max(startIndex, endIndex);
+    if ([...deletedIndexes].some((index) => index >= left && index <= right)) {
+      spanIds.add(span.id);
+    }
+  }
+  return spanIds;
+}
+
+function deleteSelectionCommandLabel(selection: NonNullable<Selection>, tokenIds: string[]): string {
+  if (selection.kind === "token") return tokenIds.length > 1 ? "Delete word boxes" : "Delete word box";
+  if (selection.kind === "line") return "Delete line";
+  if (selection.kind === "span") return "Delete span";
+  if (selection.kind === "annotation") return "Delete annotation";
+  return "Delete page object";
+}
+
+function deleteSelectionStatus(selection: NonNullable<Selection>, tokenIds: string[]): string {
+  if (selection.kind === "token") return tokenIds.length > 1 ? `Deleted ${tokenIds.length} word boxes.` : "Deleted word box.";
+  if (selection.kind === "line") return "Deleted line.";
+  if (selection.kind === "span") return "Deleted span.";
+  if (selection.kind === "annotation") return "Deleted annotation.";
+  return "Deleted page object.";
+}
+
+function isTextPageObjectKind(kind: PageObject["kind"] | PlacementMode | null): kind is TextPageObjectKind {
+  return kind === "textBlock" || kind === "titleBlock" || kind === "subtitleBlock" || kind === "sectionBlock";
+}
+
+function isTextPageObject(object: PageObject): object is TextPageObject {
+  return isTextPageObjectKind(object.kind);
+}
+
+function isInlineEditablePageObject(object: PageObject): object is InlineEditablePageObject {
+  return object.kind === "titleBlock" || object.kind === "subtitleBlock" || object.kind === "sectionBlock";
+}
+
+function pageObjectConstrainedToMargins(object: PageObject): boolean {
+  return object.kind === "image" || (isTextPageObject(object) && TEXT_PAGE_OBJECT_CONFIG[object.kind].constrainToMargins);
+}
+
+function sanitizeRectForPageObject(object: PageObject, rect: Rect, settings: PageSettings): Rect {
+  return sanitizePageObjectRect(rect, settings, pageObjectConstrainedToMargins(object));
+}
+
+function pageObjectClassName(object: PageObject, selected: boolean, editing = false): string {
+  return ["page-object", `page-object-${object.kind}`, selected ? "selected" : "", editing ? "editing" : ""].filter(Boolean).join(" ");
+}
+
+function textPageObjectClassName(kind: TextPageObjectKind): string {
+  return ["text-block", TEXT_PAGE_OBJECT_CONFIG[kind].className].join(" ");
+}
+
+function isDeleteSelectionShortcut(event: KeyboardEvent): boolean {
+  if (event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return false;
+  return event.key === "Delete" || event.key.toLowerCase() === "x";
+}
+
+function isWritableTextTarget(target: EventTarget | null): boolean {
+  const element = target instanceof HTMLElement ? target : null;
+  const editable = element?.closest<HTMLElement>("input, textarea, select, [contenteditable]");
+  if (!editable) return false;
+  if (editable instanceof HTMLInputElement || editable instanceof HTMLTextAreaElement) {
+    return !editable.readOnly && !editable.disabled;
+  }
+  if (editable instanceof HTMLSelectElement) return !editable.disabled;
+  return editable.isContentEditable;
+}
+
 function lexiconEntryMatches(entry: LexiconEntry, search: string): boolean {
   const query = search.trim().toLowerCase();
   if (!query) return true;
@@ -3476,37 +4111,35 @@ function occupiedAnnotationPlacements(entries: RenderedAnnotation[]): Partial<Re
   };
 }
 
-function getTokenDropPreview(doc: InterlinearDocument, tokenId: string): DropPreview | null {
+function getTokenSnapTargetLineId(doc: InterlinearDocument, tokenId: string): string | null {
   const located = findTokenLine(doc, tokenId);
   if (!located) return null;
-  const routedSource = routeLine(doc, located.page, located.line);
-  const active = routedSource.positionedTokens.find((positioned) => positioned.tokenId === tokenId);
-  if (!active) return null;
-  const activeRect = wordBoxRectFromPositioned(active);
-  const targetLine = nearestRenderedLine(located.page.lines, activeRect.y);
-  if (!targetLine) return null;
-  const routedTarget = routeLine(doc, located.page, targetLine);
-  const targetTokens = routedTarget.positionedTokens
-    .filter((positioned) => positioned.tokenId !== tokenId)
-    .map((positioned) => ({ tokenId: positioned.tokenId, rect: wordBoxRectFromPositioned(positioned) }));
-  const ordered = [...targetTokens, { tokenId, rect: activeRect }].sort((left, right) => left.rect.x - right.rect.x);
-  const index = ordered.findIndex((item) => item.tokenId === tokenId);
-  const previous = index > 0 ? ordered[index - 1] : null;
-  const band =
-    routedTarget.bands.find((candidate) => activeRect.x >= candidate.x && activeRect.x <= candidate.x + candidate.width) ??
-    routedTarget.bands[0];
-  const leftBound = band?.x ?? doc.pageSettings.marginLeft;
-  const rightBound = band ? band.x + band.width : doc.pageSettings.width - doc.pageSettings.marginRight;
-  const desiredX = previous ? previous.rect.x + previous.rect.width + 4 : activeRect.x;
-  const x = Math.min(Math.max(desiredX, leftBound), Math.max(leftBound, rightBound - 2));
+  const routed = routeLine(doc, located.page, located.line);
+  const positioned = routed.positionedTokens.find((item) => item.tokenId === tokenId);
+  const token = doc.tokens[tokenId];
+  const visualY = positioned?.rect.y ?? located.line.y + (token?.offset.y ?? 0);
+  let best: { lineId: string; distance: number } | null = null;
+  for (const line of located.page.lines) {
+    const distance = Math.abs(line.y + line.offset.y - visualY);
+    if (distance <= LINE_SNAP_DISTANCE && (!best || distance < best.distance)) {
+      best = { lineId: line.id, distance };
+    }
+  }
+  return best?.lineId ?? null;
+}
 
-  return {
-    pageId: located.page.id,
-    lineId: targetLine.id,
-    x,
-    y: routedTarget.y,
-    height: sourceLineBoxHeight(doc.pageSettings)
-  };
+function lineGuideClassName({ selected, snapTarget }: { selected: boolean; snapTarget: boolean }): string {
+  return ["line-guide", selected ? "selected" : "", snapTarget ? "snap-target" : ""].filter(Boolean).join(" ");
+}
+
+function lineLayerClassName({ selected, snapTarget }: { selected: boolean; snapTarget: boolean }): string {
+  return ["line-layer", selected ? "selected" : "", snapTarget ? "snap-target" : ""].filter(Boolean).join(" ");
+}
+
+function pageClassName(placementMode: PlacementMode | null, guidesVisible: boolean): string {
+  return ["page", placementMode ? `placement-mode-${placementMode}` : "", guidesVisible ? "" : "guides-hidden"]
+    .filter(Boolean)
+    .join(" ");
 }
 
 function findTokenLine(
@@ -3520,19 +4153,19 @@ function findTokenLine(
   return null;
 }
 
-function nearestRenderedLine(lines: InterlinearLine[], y: number): InterlinearLine | null {
-  let best: { line: InterlinearLine; distance: number } | null = null;
-  for (const line of lines) {
-    const distance = Math.abs(line.y + line.offset.y - y);
-    if (!best || distance < best.distance) {
-      best = { line, distance };
-    }
-  }
-  return best?.line ?? null;
-}
-
 function fileName(path: string): string {
   return path.split(/[\\/]/).at(-1) ?? path;
+}
+
+async function resolveImageAssetUrl(assetPath: string, documentPath: string | null): Promise<string | null> {
+  if (!window.interlinear || !assetPath.trim()) return null;
+  if (documentPath) return window.interlinear.resolveAssetUrl(documentPath, assetPath);
+  if (isLikelyAbsolutePath(assetPath)) return window.interlinear.fileToAssetUrl(assetPath);
+  return null;
+}
+
+function isLikelyAbsolutePath(path: string): boolean {
+  return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path);
 }
 
 function folderName(path: string): string {
@@ -3724,6 +4357,32 @@ function pagePointFromElement(
     x: clamp((clientX - rect.left) / zoom, 0, settings.width),
     y: clamp((clientY - rect.top) / zoom, 0, settings.height)
   };
+}
+
+function scheduleZoomAnchorRestore(anchor: ZoomAnchor, nextZoom: number) {
+  const schedule =
+    typeof window !== "undefined" && typeof window.requestAnimationFrame === "function"
+      ? (callback: FrameRequestCallback) => window.requestAnimationFrame(callback)
+      : (callback: FrameRequestCallback) => window.setTimeout(callback, 0);
+  schedule(() => restoreZoomAnchor(anchor, nextZoom));
+}
+
+function restoreZoomAnchor(anchor: ZoomAnchor, nextZoom: number) {
+  const page = anchor.container.querySelector<HTMLElement>(".page");
+  if (!page) return;
+  const rect = page.getBoundingClientRect();
+  const nextClientX = rect.left + anchor.pageX * nextZoom;
+  const nextClientY = rect.top + anchor.pageY * nextZoom;
+  anchor.container.scrollLeft += nextClientX - anchor.clientX;
+  anchor.container.scrollTop += nextClientY - anchor.clientY;
+}
+
+function roundZoom(value: number): number {
+  return Number(value.toFixed(2));
+}
+
+function formatZoomPercent(zoom: number): number {
+  return Math.round((zoom / DEFAULT_ZOOM) * 100);
 }
 
 function round(value: number): number {

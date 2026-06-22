@@ -102,22 +102,29 @@ export const PageObjectSchema = z.discriminatedUnion("kind", [
     rect: RectSchema,
     wrapMode: z.enum(["rectangular", "none"]).default("rectangular"),
     zIndex: z.number().int().default(1),
-    assetPath: z.string().min(1),
+    assetPath: z.string().default(""),
     caption: z.string().optional(),
     metadata: z.record(z.string()).default({})
   }),
-  z.object({
+  textPageObjectSchema("textBlock"),
+  textPageObjectSchema("titleBlock"),
+  textPageObjectSchema("subtitleBlock"),
+  textPageObjectSchema("sectionBlock")
+]);
+export type PageObject = z.infer<typeof PageObjectSchema>;
+
+function textPageObjectSchema(kind: "textBlock" | "titleBlock" | "subtitleBlock" | "sectionBlock") {
+  return z.object({
     id: z.string().min(1),
-    kind: z.literal("textBlock"),
+    kind: z.literal(kind),
     rect: RectSchema,
     wrapMode: z.enum(["rectangular", "none"]).default("rectangular"),
     zIndex: z.number().int().default(1),
     content: z.string().default(""),
     caption: z.string().optional(),
     metadata: z.record(z.string()).default({})
-  })
-]);
-export type PageObject = z.infer<typeof PageObjectSchema>;
+  });
+}
 
 export const PageSchema = z.object({
   id: z.string().min(1),

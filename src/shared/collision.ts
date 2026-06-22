@@ -1,18 +1,26 @@
-import { estimateTokenWidth, routeLine, sourceLineBoxHeight, type PositionedToken } from "./layout.js";
+import { estimateTokenWidth, pageObjectObstacleRect, routeLine, sourceLineBoxHeight, type PositionedToken } from "./layout.js";
 import type { AnnotationCell, InterlinearDocument, InterlinearLine, Layer, Page, PageSettings, Rect } from "./schema.js";
 
 export const WORD_BOX_MIN_WIDTH = 22;
 export const WORD_BOX_EMPTY_MIN_WIDTH = 34;
-export const WORD_BOX_WIDTH_PADDING = 18;
+export const WORD_BOX_WIDTH_PADDING = 12;
+export const ANNOTATION_BOX_WIDTH_PADDING = WORD_BOX_WIDTH_PADDING;
 export const WORD_BOX_COLLISION_GAP = 1;
 export const ANNOTATION_CONNECTOR_LENGTH = 11;
 export const ANNOTATION_STACK_GAP = 4;
+const COLLISION_RESOLUTION_EPSILON = 0.001;
 
 export type WordBoxCollision = {
   leftTokenId: string;
   rightTokenId: string;
   leftRect: Rect;
   rightRect: Rect;
+};
+
+export type WordBoxObstacleCollision = {
+  tokenId: string;
+  wordBoxRect: Rect;
+  obstacleRect: Rect;
 };
 
 export type LineCollision = {
@@ -65,11 +73,7 @@ export function annotationBoxRect(
 ): Rect {
   const height = sourceLineBoxHeight(settings);
   const fontSize = annotationBoxFontSize(settings);
-  const width = Math.max(
-    sourceRect.width,
-    WORD_BOX_EMPTY_MIN_WIDTH,
-    estimateTokenWidth(cell.text || "Annotation", fontSize) + WORD_BOX_WIDTH_PADDING
-  );
+  const width = estimateTokenWidth(cell.text || "Annotation", fontSize) + ANNOTATION_BOX_WIDTH_PADDING;
   const stackOffset = placementIndex * (height + ANNOTATION_STACK_GAP);
   const x = sourceRect.x + sourceRect.width / 2 - width / 2 + cell.offset.x;
   const y =
@@ -78,6 +82,28 @@ export function annotationBoxRect(
       : sourceRect.y + sourceRect.height + ANNOTATION_CONNECTOR_LENGTH + stackOffset + cell.offset.y;
 
   return { x, y, width, height };
+}
+
+export function wordBoxCollisionRectsForPositioned(
+  document: InterlinearDocument,
+  layers: Layer[],
+  positioned: PositionedToken
+): Rect[] {
+  const sourceRect = wordBoxRectFromPositioned(positioned);
+  const annotationRects = annotationEntriesForToken(document, layers, positioned.tokenId).map((entry) =>
+    annotationBoxRect(sourceRect, entry.cell, document.pageSettings, entry.placementIndex)
+  );
+  return [sourceRect, ...annotationRects];
+}
+
+export function wordBoxCollisionRectsForToken(
+  document: InterlinearDocument,
+  page: Page,
+  line: InterlinearLine,
+  tokenId: string
+): Rect[] {
+  const positioned = routeLine(document, page, line).positionedTokens.find((item) => item.tokenId === tokenId);
+  return positioned ? wordBoxCollisionRectsForPositioned(document, orderedVisibleLayers(document), positioned) : [];
 }
 
 export function annotationEntriesForToken(
@@ -146,24 +172,49 @@ export function findWordBoxCollisions(
   line: InterlinearLine,
   spacing = 0
 ): WordBoxCollision[] {
-  const routed = routeLine(document, page, line);
-  const boxes = routed.positionedTokens.map((positioned) => ({
-    tokenId: positioned.tokenId,
-    rect: wordBoxRectFromPositioned(positioned)
-  }));
+  const boxes = wordBoxCollisionGroups(document, page, line);
   const collisions: WordBoxCollision[] = [];
 
   for (let leftIndex = 0; leftIndex < boxes.length; leftIndex += 1) {
     for (let rightIndex = leftIndex + 1; rightIndex < boxes.length; rightIndex += 1) {
       const left = boxes[leftIndex];
       const right = boxes[rightIndex];
-      if (rectsOverlap(left.rect, right.rect, spacing)) {
+      const overlapping = firstOverlappingRectPair(left.rects, right.rects, spacing);
+      if (overlapping) {
         collisions.push({
           leftTokenId: left.tokenId,
           rightTokenId: right.tokenId,
-          leftRect: left.rect,
-          rightRect: right.rect
+          leftRect: overlapping.left,
+          rightRect: overlapping.right
         });
+      }
+    }
+  }
+
+  return collisions;
+}
+
+export function findWordBoxObstacleCollisions(
+  document: InterlinearDocument,
+  page: Page,
+  line: InterlinearLine,
+  spacing = 0
+): WordBoxObstacleCollision[] {
+  const boxes = wordBoxCollisionGroups(document, page, line);
+  const obstacles = pageObjectCollisionRects(page);
+  const collisions: WordBoxObstacleCollision[] = [];
+
+  for (const box of boxes) {
+    for (const rect of box.rects) {
+      for (const obstacle of obstacles) {
+        if (rectsOverlap(rect, obstacle, spacing)) {
+          collisions.push({
+            tokenId: box.tokenId,
+            wordBoxRect: rect,
+            obstacleRect: obstacle
+          });
+          break;
+        }
       }
     }
   }
@@ -211,26 +262,24 @@ export function resolveWordBoxCollisions(
     const found = findLine(next, pageId, lineId);
     if (!found) return next;
 
-    const routed = routeLine(next, found.page, found.line);
-    let minimumX = Number.NEGATIVE_INFINITY;
+    const groups = wordBoxCollisionGroups(next, found.page, found.line);
+    const obstacleRects = pageObjectCollisionRects(found.page);
+    const priorRects: Rect[] = [];
     let changed = false;
     const tokens = { ...next.tokens };
 
-    for (const positioned of routed.positionedTokens) {
-      const token = tokens[positioned.tokenId];
+    for (const group of groups) {
+      const token = tokens[group.tokenId];
       if (!token) continue;
-      const rect = wordBoxRectFromPositioned(positioned);
-      if (rect.x < minimumX) {
-        const shift = minimumX - rect.x;
+      const shift = collisionResolvingShift(group.rects, [...priorRects, ...obstacleRects], spacing, found.line.direction);
+      if (shift !== 0) {
         tokens[token.id] = {
           ...token,
           offset: { x: token.offset.x + shift, y: token.offset.y }
         };
         changed = true;
-        minimumX += rect.width + spacing;
-      } else {
-        minimumX = rect.x + rect.width + spacing;
       }
+      priorRects.push(...group.rects.map((rect) => shiftRect(rect, shift, 0)));
     }
 
     if (!changed) return next;
@@ -238,6 +287,10 @@ export function resolveWordBoxCollisions(
   }
 
   return next;
+}
+
+export function pageObjectCollisionRects(page: Page): Rect[] {
+  return page.pageObjects.filter((object) => object.wrapMode === "rectangular").map(pageObjectObstacleRect);
 }
 
 export function resolveLineCollisions(
@@ -300,6 +353,55 @@ function stackAnnotationEntries(cells: AnnotationCell[]): RenderedAnnotation[] {
     placementCounts[cell.placement] += 1;
     return { cell, placementIndex };
   });
+}
+
+function wordBoxCollisionGroups(document: InterlinearDocument, page: Page, line: InterlinearLine) {
+  const layers = orderedVisibleLayers(document);
+  return routeLine(document, page, line).positionedTokens.map((positioned) => ({
+    tokenId: positioned.tokenId,
+    rects: wordBoxCollisionRectsForPositioned(document, layers, positioned)
+  }));
+}
+
+function firstOverlappingRectPair(leftRects: Rect[], rightRects: Rect[], spacing: number): { left: Rect; right: Rect } | null {
+  for (const left of leftRects) {
+    for (const right of rightRects) {
+      if (rectsOverlap(left, right, spacing)) return { left, right };
+    }
+  }
+  return null;
+}
+
+function collisionResolvingShift(
+  rects: Rect[],
+  blockers: Rect[],
+  spacing: number,
+  direction: InterlinearLine["direction"]
+): number {
+  let shift = 0;
+  const maxPasses = Math.max(1, rects.length * Math.max(1, blockers.length));
+
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    let nextShift = shift;
+    for (const rect of rects) {
+      const shifted = shiftRect(rect, shift, 0);
+      for (const blocker of blockers) {
+        if (!rectsOverlap(shifted, blocker, spacing)) continue;
+        nextShift =
+          direction === "rtl"
+            ? Math.min(nextShift, blocker.x - spacing - COLLISION_RESOLUTION_EPSILON - (rect.x + rect.width))
+            : Math.max(nextShift, blocker.x + blocker.width + spacing + COLLISION_RESOLUTION_EPSILON - rect.x);
+      }
+    }
+    if (nextShift === shift) return shift;
+    shift = nextShift;
+  }
+
+  return shift;
+}
+
+function shiftRect(rect: Rect, dx: number, dy: number): Rect {
+  return { ...rect, x: rect.x + dx, y: rect.y + dy };
 }
 
 function findLine(

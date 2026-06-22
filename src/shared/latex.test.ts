@@ -80,6 +80,81 @@ describe("LaTeX export", () => {
     expect(tex).toContain("{\\detokenize{/tmp/interlinear assets/plate_#1.png}}}");
   });
 
+  it("omits image placeholders without source assets", () => {
+    const doc = createSampleDocument();
+    const tex = documentToLatex({
+      ...doc,
+      pages: [
+        {
+          ...doc.pages[0],
+          pageObjects: [
+            {
+              id: "placeholder_image",
+              kind: "image",
+              rect: { x: 77, y: 88, width: 123, height: 45 },
+              wrapMode: "rectangular",
+              zIndex: 3,
+              assetPath: "",
+              caption: "",
+              metadata: {}
+            },
+            ...doc.pages[0].pageObjects
+          ]
+        }
+      ]
+    });
+
+    expect(tex).not.toContain("\\includegraphics");
+  });
+
+  it("exports title, subtitle, and section blocks with semantic text styles", () => {
+    const doc = createSampleDocument();
+    const tex = documentToLatex({
+      ...doc,
+      pages: [
+        {
+          ...doc.pages[0],
+          pageObjects: [
+            {
+              id: "title_block",
+              kind: "titleBlock",
+              rect: { x: 54, y: 54, width: 420, height: 52 },
+              wrapMode: "rectangular",
+              zIndex: 3,
+              content: "Main Title",
+              caption: "",
+              metadata: {}
+            },
+            {
+              id: "subtitle_block",
+              kind: "subtitleBlock",
+              rect: { x: 54, y: 112, width: 380, height: 40 },
+              wrapMode: "rectangular",
+              zIndex: 3,
+              content: "A Subtitle",
+              caption: "",
+              metadata: {}
+            },
+            {
+              id: "section_block",
+              kind: "sectionBlock",
+              rect: { x: 54, y: 170, width: 320, height: 34 },
+              wrapMode: "rectangular",
+              zIndex: 3,
+              content: "Section 1",
+              caption: "",
+              metadata: {}
+            }
+          ]
+        }
+      ]
+    });
+
+    expect(tex).toContain("\\fontsize{22}{26}\\selectfont \\bfseries Main Title");
+    expect(tex).toContain("\\fontsize{15}{19}\\selectfont \\itshape A Subtitle");
+    expect(tex).toContain("\\fontsize{14}{17}\\selectfont \\bfseries Section 1");
+  });
+
   it("omits page numbers by default and exports them when enabled", () => {
     const doc = createSampleDocument();
     const withoutPageNumbers = documentToLatex(doc);

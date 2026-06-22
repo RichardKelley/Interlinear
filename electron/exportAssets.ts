@@ -18,6 +18,7 @@ export async function resolveDocumentAssetsForExport(
       pageObjects: await Promise.all(
         page.pageObjects.map(async (object): Promise<PageObject> => {
           if (object.kind !== "image") return object;
+          if (!object.assetPath.trim()) return object;
           const assetPath = resolveExportAssetPath(object.assetPath, documentPath);
           await assertAssetExists(object.assetPath, assetPath);
           return { ...object, assetPath };

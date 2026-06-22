@@ -20,6 +20,7 @@ export type RoutedPage = {
 };
 
 const MIN_BAND_WIDTH = 48;
+export const IMAGE_OBJECT_EXTERNAL_PADDING = 12;
 export const TOKEN_GAP = 8;
 
 export function sourceLineBoxHeight(settings: InterlinearDocument["pageSettings"]): number {
@@ -42,8 +43,12 @@ export function availableBands(page: Page, settings: InterlinearDocument["pageSe
 
   const obstacles = page.pageObjects
     .filter((object) => object.wrapMode === "rectangular")
-    .map((object) => object.rect)
-    .filter((rect) => intersectsVertically(rect, y, lineHeight));
+    .map((object) => ({
+      rect: pageObjectObstacleRect(object),
+      collisionHeight: object.kind === "image" ? sourceLineBoxHeight(settings) : lineHeight
+    }))
+    .filter(({ rect, collisionHeight }) => intersectsVertically(rect, y, collisionHeight))
+    .map(({ rect }) => rect);
 
   for (const obstacle of obstacles) {
     bands = bands.flatMap((band) => subtractObstacle(band, obstacle));
@@ -134,5 +139,18 @@ export function routeDocument(document: InterlinearDocument): RoutedPage[] {
 }
 
 export function objectBlocksLine(object: PageObject, y: number, height: number): boolean {
-  return object.wrapMode === "rectangular" && intersectsVertically(object.rect, y, height);
+  return object.wrapMode === "rectangular" && intersectsVertically(pageObjectObstacleRect(object), y, height);
+}
+
+export function pageObjectObstacleRect(object: PageObject): Rect {
+  return object.kind === "image" ? inflateRect(object.rect, IMAGE_OBJECT_EXTERNAL_PADDING) : object.rect;
+}
+
+function inflateRect(rect: Rect, padding: number): Rect {
+  return {
+    x: rect.x - padding,
+    y: rect.y - padding,
+    width: rect.width + padding * 2,
+    height: rect.height + padding * 2
+  };
 }

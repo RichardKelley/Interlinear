@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createSampleDocument } from "./documentFactory";
-import { availableBands, routeLine, sourceLineBoxHeight } from "./layout";
+import { availableBands, IMAGE_OBJECT_EXTERNAL_PADDING, routeLine, sourceLineBoxHeight } from "./layout";
 import { tokenTextMetricKey } from "./textMetrics";
 
 describe("layout routing", () => {
@@ -20,6 +20,76 @@ describe("layout routing", () => {
           band.x >= page.pageObjects[0].rect.x + page.pageObjects[0].rect.width
       )
     ).toBe(true);
+  });
+
+  it("subtracts image objects with external padding from line bands", () => {
+    const doc = createSampleDocument();
+    const line = doc.pages[0].lines[0];
+    const image = {
+      id: "image_obstacle",
+      kind: "image" as const,
+      rect: { x: 210, y: line.y - 10, width: 80, height: 80 },
+      wrapMode: "rectangular" as const,
+      zIndex: 1,
+      assetPath: "",
+      caption: "",
+      metadata: {}
+    };
+    const page = {
+      ...doc.pages[0],
+      pageObjects: [image]
+    };
+
+    const bands = availableBands(page, doc.pageSettings, line.y, 60);
+
+    expect(bands).toEqual([
+      {
+        x: doc.pageSettings.marginLeft,
+        y: line.y,
+        width: image.rect.x - IMAGE_OBJECT_EXTERNAL_PADDING - doc.pageSettings.marginLeft,
+        height: 60
+      },
+      {
+        x: image.rect.x + image.rect.width + IMAGE_OBJECT_EXTERNAL_PADDING,
+        y: line.y,
+        width:
+          doc.pageSettings.width -
+          doc.pageSettings.marginRight -
+          (image.rect.x + image.rect.width + IMAGE_OBJECT_EXTERNAL_PADDING),
+        height: 60
+      }
+    ]);
+  });
+
+  it("does not subtract image padding above the visible source line box", () => {
+    const doc = createSampleDocument();
+    const lineHeight = sourceLineBoxHeight(doc.pageSettings);
+    const image = {
+      id: "image_obstacle",
+      kind: "image" as const,
+      rect: { x: 210, y: 210, width: 80, height: 80 },
+      wrapMode: "rectangular" as const,
+      zIndex: 1,
+      assetPath: "",
+      caption: "",
+      metadata: {}
+    };
+    const page = {
+      ...doc.pages[0],
+      pageObjects: [image]
+    };
+    const lineY = image.rect.y - IMAGE_OBJECT_EXTERNAL_PADDING - lineHeight - 1;
+
+    const bands = availableBands(page, doc.pageSettings, lineY, 60);
+
+    expect(bands).toEqual([
+      {
+        x: doc.pageSettings.marginLeft,
+        y: lineY,
+        width: doc.pageSettings.width - doc.pageSettings.marginLeft - doc.pageSettings.marginRight,
+        height: 60
+      }
+    ]);
   });
 
   it("positions tokens into available routed bands", () => {

@@ -35,4 +35,26 @@ describe("page object geometry", () => {
       height: 240
     });
   });
+
+  it("clamps margin-constrained objects to the content box", () => {
+    const settings = { width: 612, height: 792, marginTop: 54, marginRight: 54, marginBottom: 54, marginLeft: 54 };
+
+    expect(sanitizePageObjectRect({ x: 600, y: 10, width: 170, height: 120 }, settings, true)).toEqual({
+      x: 388,
+      y: 54,
+      width: 170,
+      height: 120
+    });
+  });
+
+  it("clamps margin-constrained resizing to the content box", () => {
+    const settings = { width: 300, height: 240, marginTop: 20, marginRight: 30, marginBottom: 40, marginLeft: 10 };
+
+    expect(resizePageObjectRect({ x: 100, y: 80, width: 120, height: 90 }, "nw", -500, -500, settings, true)).toEqual({
+      x: 10,
+      y: 20,
+      width: 260,
+      height: 180
+    });
+  });
 });
