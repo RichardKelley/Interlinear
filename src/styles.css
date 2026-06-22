@@ -595,10 +595,10 @@ textarea {
   border: 1px solid rgba(72, 78, 69, 0.72);
   border-radius: 50%;
   cursor: pointer;
-  height: 11px;
+  height: 6.6px;
   padding: 0;
   position: absolute;
-  width: 11px;
+  width: 6.6px;
   z-index: 8;
 }
 

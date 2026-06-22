@@ -4,6 +4,7 @@ import {
   Eye,
   EyeOff,
   FileDown,
+  FilePlus,
   FolderOpen,
   Heading1,
   Heading2,
@@ -35,6 +36,7 @@ import { applyCommand, createDocumentCommand, DocumentCommand, revertCommand } f
 import {
   addLineAtDocument,
   addLineToDocument,
+  addPageToDocument,
   addWordBoxToLineDocument,
   addWordBoxToDocument,
   insertWordBoxAfterToken,
@@ -296,6 +298,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
   const [focusTokenId, setFocusTokenId] = useState<string | null>(null);
   const [focusAnnotationId, setFocusAnnotationId] = useState<string | null>(null);
   const [focusPageObjectId, setFocusPageObjectId] = useState<string | null>(null);
+  const [focusPageId, setFocusPageId] = useState<string | null>(null);
   const [status, setStatus] = useState("Ready");
   const [exportErrorDetail, setExportErrorDetail] = useState("");
   const [fileErrorDetail, setFileErrorDetail] = useState("");
@@ -401,6 +404,16 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     input.select();
     setFocusPageObjectId(null);
   }, [doc, focusPageObjectId]);
+
+  useEffect(() => {
+    if (!focusPageId) return;
+    const page = document.querySelector<HTMLElement>(`[data-page-id="${focusPageId}"]`);
+    if (!page) return;
+    if (typeof page.scrollIntoView === "function") {
+      page.scrollIntoView({ block: "start", inline: "nearest" });
+    }
+    setFocusPageId(null);
+  }, [doc.pages, focusPageId]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -529,6 +542,7 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
       setEditingPageObjectId(null);
       setFocusAnnotationId(null);
       setFocusPageObjectId(null);
+      setFocusPageId(null);
       setPlacementMode(null);
       setPlacementSticky(false);
       setUndoStack([]);
@@ -800,6 +814,23 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
     setEditingAnnotationId(null);
     setEditingPageObjectId(null);
     setStatus("Created line.");
+  }
+
+  function createPage() {
+    const pageId = createId("page");
+    const afterPageId = pageIdForSelection(doc, selection) ?? doc.pages.at(-1)?.id;
+    updateDocument((current) => addPageToDocument(current, pageId, afterPageId), "Add page");
+    setSelection(null);
+    setSelectedTokenIds([]);
+    setEditingTokenId(null);
+    setEditingAnnotationId(null);
+    setEditingPageObjectId(null);
+    setFocusTokenId(null);
+    setFocusAnnotationId(null);
+    setFocusPageObjectId(null);
+    setFocusPageId(pageId);
+    setInspectorTab("document");
+    setStatus("Created page.");
   }
 
   function deleteSelectedNode(): boolean {
@@ -1967,6 +1998,13 @@ export function App({ initialDocument, initialLexicon }: AppProps = {}) {
               sticky={placementMode === "line" && placementSticky}
             />
             <IconButton
+              label="Add page"
+              shortLabel="Page"
+              tooltip="Create a new page after the current page."
+              onClick={createPage}
+              icon={<FilePlus size={18} />}
+            />
+            <IconButton
               label={doc.lineGuidesVisible ? "Hide line guides" : "Show line guides"}
               shortLabel="Guides"
               tooltip={doc.lineGuidesVisible ? "Hide page guide lines." : "Show page guide lines."}
@@ -2363,6 +2401,8 @@ function PageView({
   return (
     <div
       className="page-frame"
+      data-page-id={page.id}
+      aria-label={`Page ${page.number}`}
       style={{
         width: doc.pageSettings.width * zoom,
         height: doc.pageSettings.height * zoom
@@ -2692,7 +2732,7 @@ function AnnotationHandlePair({
 }) {
   const centerX = rect.x + rect.width / 2;
   const connectorLength = ANNOTATION_CONNECTOR_LENGTH;
-  const handleSize = 11;
+  const handleSize = 6.6;
 
   function createFromHandle(placement: AnnotationPlacement, event: React.MouseEvent<HTMLButtonElement>) {
     event.stopPropagation();
@@ -4140,6 +4180,26 @@ function pageClassName(placementMode: PlacementMode | null, guidesVisible: boole
   return ["page", placementMode ? `placement-mode-${placementMode}` : "", guidesVisible ? "" : "guides-hidden"]
     .filter(Boolean)
     .join(" ");
+}
+
+function pageIdForSelection(doc: InterlinearDocument, selection: Selection): string | undefined {
+  if (!selection) return undefined;
+  if (selection.kind === "token") return findTokenLine(doc, selection.id)?.page.id;
+  if (selection.kind === "line") return doc.pages.find((page) => page.lines.some((line) => line.id === selection.id))?.id;
+  if (selection.kind === "pageObject") {
+    return doc.pages.find((page) => page.pageObjects.some((object) => object.id === selection.id))?.id;
+  }
+  if (selection.kind === "span") {
+    const span = doc.layerSpans[selection.id];
+    return span ? findTokenLine(doc, span.startTokenId)?.page.id : undefined;
+  }
+  const annotation = doc.annotationCells[selection.id];
+  if (!annotation) return undefined;
+  if (annotation.spanId) {
+    const span = doc.layerSpans[annotation.spanId];
+    if (span) return findTokenLine(doc, span.startTokenId)?.page.id;
+  }
+  return findTokenLine(doc, annotation.tokenId)?.page.id;
 }
 
 function findTokenLine(

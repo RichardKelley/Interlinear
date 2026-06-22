@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { addPageToDocument } from "../src/shared/composition";
 import { createEmptyLexicon, createSampleDocument } from "../src/shared/documentFactory";
 import { readDocumentFile, readLexiconFile, writeDocumentFile, writeLexiconFile } from "./documentFiles";
 
@@ -29,6 +30,20 @@ describe("document file persistence", () => {
     expect(opened.title).toBe("Roundtrip");
     expect(opened.id).toBe(document.id);
     expect(saved.updatedAt).toBe(opened.updatedAt);
+  });
+
+  it("preserves multiple pages in document roundtrips", async () => {
+    root = await mkdtemp(join(tmpdir(), "interlinear-multipage-doc-"));
+    const filePath = join(root, "multipage.iltdoc");
+    const baseDocument = createSampleDocument();
+    const document = addPageToDocument(baseDocument, "page_second", baseDocument.pages[0].id);
+
+    await writeDocumentFile(filePath, document);
+    const opened = await readDocumentFile(filePath);
+
+    expect(opened.pages).toHaveLength(2);
+    expect(opened.pages.map((page) => page.number)).toEqual([1, 2]);
+    expect(opened.pages[1]).toMatchObject({ id: "page_second", lines: [], pageObjects: [] });
   });
 
   it("saves and opens a lexicon roundtrip through temp files", async () => {

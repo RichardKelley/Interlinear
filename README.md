@@ -46,6 +46,8 @@ npm run dev:renderer
 Open `http://127.0.0.1:5173` and check:
 
 - Ribbon controls render, including Open, Save, Save As, exports, word/line tools, layer toggles, and visibility toggles.
+- Add Page creates a second page, and Undo/Redo removes and restores it.
+- Typing past the available space at the bottom of a page creates or advances to a following page instead of stacking lines at the bottom.
 - Direct word-box editing works on the page; the document shows Modified after an edit.
 - Line guides can be hidden and shown without moving word boxes.
 - Page objects can be selected, moved, resized, and switched between rectangular and none wrapping.

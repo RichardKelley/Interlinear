@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { addPageToDocument } from "./composition";
 import { createSampleDocument } from "./documentFactory";
 import { detokenizeLatex, documentToLatex, escapeLatex } from "./latex";
 import { tokenTextMetricKey } from "./textMetrics";
@@ -17,6 +18,38 @@ describe("LaTeX export", () => {
     expect(tex).toContain("what-it-was-to-be");
     expect(tex).toContain("Independent note block");
     expect(tex).toContain("\\put(");
+  });
+
+  it("exports multiple pages in page order", () => {
+    const base = createSampleDocument();
+    const withSecondPage = addPageToDocument(base, "page_second", base.pages[0].id);
+    const doc = {
+      ...withSecondPage,
+      pages: withSecondPage.pages.map((page) =>
+        page.id === "page_second"
+          ? {
+              ...page,
+              pageObjects: [
+                {
+                  id: "second_page_note",
+                  kind: "textBlock" as const,
+                  rect: { x: 54, y: 54, width: 180, height: 48 },
+                  wrapMode: "rectangular" as const,
+                  zIndex: 1,
+                  content: "Second page note",
+                  caption: "",
+                  metadata: {}
+                }
+              ]
+            }
+          : page
+      )
+    };
+
+    const tex = documentToLatex(doc);
+
+    expect(tex.indexOf("Independent note block")).toBeLessThan(tex.indexOf("\\newpage"));
+    expect(tex.indexOf("\\newpage")).toBeLessThan(tex.indexOf("Second page note"));
   });
 
   it("escapes font names and LaTeX-sensitive interlinear text", () => {

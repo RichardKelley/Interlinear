@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  addPageToDocument,
   addLineAtDocument,
   addLineToDocument,
   addWordBoxToLineDocument,
@@ -23,6 +24,16 @@ import { IMAGE_OBJECT_EXTERNAL_PADDING, routeLine, sourceLineBoxHeight, TOKEN_GA
 import { tokenTextMetricKey } from "./textMetrics";
 
 describe("page composition", () => {
+  it("adds a new page after the requested page and renumbers pages", () => {
+    const doc = createSampleDocument();
+
+    const next = addPageToDocument(doc, "page_second", doc.pages[0].id);
+
+    expect(next.pages).toHaveLength(2);
+    expect(next.pages.map((page) => page.number)).toEqual([1, 2]);
+    expect(next.pages[1]).toMatchObject({ id: "page_second", lines: [], pageObjects: [] });
+  });
+
   it("adds an explicit guide line after the selected anchor line", () => {
     const doc = createSampleDocument();
     const page = doc.pages[0];
@@ -198,6 +209,120 @@ describe("page composition", () => {
     expect(next.pages[0].lines.length).toBeGreaterThan(page.lines.length);
     expect(targetLine.tokenIds).toContain("tok_overflow");
     expect(findWordBoxCollisions(next, next.pages[0], targetLine)).toHaveLength(0);
+  });
+
+  it("moves an overflowing new word box to an existing next page instead of clamping at the page bottom", () => {
+    const doc = createEmptyDocument();
+    const maxLineY = doc.pageSettings.height - doc.pageSettings.marginBottom - sourceLineBoxHeight(doc.pageSettings);
+    const line = {
+      id: "line_bottom",
+      tokenIds: [],
+      y: maxLineY,
+      offset: { x: 0, y: 0 },
+      direction: "ltr" as const
+    };
+    const firstPage = {
+      ...doc.pages[0],
+      lines: [line],
+      pageObjects: [
+        {
+          id: "full_width_obstacle",
+          kind: "textBlock" as const,
+          rect: {
+            x: doc.pageSettings.marginLeft,
+            y: maxLineY - 4,
+            width: doc.pageSettings.width - doc.pageSettings.marginLeft - doc.pageSettings.marginRight,
+            height: sourceLineBoxHeight(doc.pageSettings) + 8
+          },
+          wrapMode: "rectangular" as const,
+          zIndex: 1,
+          content: "",
+          caption: "",
+          metadata: {}
+        }
+      ]
+    };
+    const secondPage = { id: "page_second", number: 2, lines: [], pageObjects: [] };
+    const blockedDoc = { ...doc, pages: [firstPage, secondPage] };
+
+    const next = addWordBoxToDocument(blockedDoc, firstPage.id, "tok_overflow", {
+      x: doc.pageSettings.marginLeft,
+      y: maxLineY
+    });
+
+    expect(next.pages).toHaveLength(2);
+    expect(next.pages[0].lines[0].tokenIds).not.toContain("tok_overflow");
+    expect(next.pages[1].lines).toHaveLength(1);
+    expect(next.pages[1].lines[0]).toMatchObject({ y: doc.pageSettings.marginTop, tokenIds: ["tok_overflow"] });
+    expect(next.tokens.tok_overflow.lineId).toBe(next.pages[1].lines[0].id);
+  });
+
+  it("chooses an available line position on the next page when top content is blocked", () => {
+    const doc = createEmptyDocument();
+    const maxLineY = doc.pageSettings.height - doc.pageSettings.marginBottom - sourceLineBoxHeight(doc.pageSettings);
+    const contentWidth = doc.pageSettings.width - doc.pageSettings.marginLeft - doc.pageSettings.marginRight;
+    const firstPage = {
+      ...doc.pages[0],
+      lines: [
+        {
+          id: "line_bottom",
+          tokenIds: [],
+          y: maxLineY,
+          offset: { x: 0, y: 0 },
+          direction: "ltr" as const
+        }
+      ],
+      pageObjects: [
+        {
+          id: "bottom_obstacle",
+          kind: "textBlock" as const,
+          rect: {
+            x: doc.pageSettings.marginLeft,
+            y: maxLineY - 4,
+            width: contentWidth,
+            height: sourceLineBoxHeight(doc.pageSettings) + 8
+          },
+          wrapMode: "rectangular" as const,
+          zIndex: 1,
+          content: "",
+          caption: "",
+          metadata: {}
+        }
+      ]
+    };
+    const secondPage = {
+      id: "page_second",
+      number: 2,
+      lines: [],
+      pageObjects: [
+        {
+          id: "top_obstacle",
+          kind: "textBlock" as const,
+          rect: {
+            x: doc.pageSettings.marginLeft,
+            y: doc.pageSettings.marginTop,
+            width: contentWidth,
+            height: 80
+          },
+          wrapMode: "rectangular" as const,
+          zIndex: 1,
+          content: "",
+          caption: "",
+          metadata: {}
+        }
+      ]
+    };
+    const blockedDoc = { ...doc, pages: [firstPage, secondPage] };
+
+    const next = addWordBoxToDocument(blockedDoc, firstPage.id, "tok_overflow", {
+      x: doc.pageSettings.marginLeft,
+      y: maxLineY
+    });
+
+    const targetLine = next.pages[1].lines.find((line) => line.tokenIds.includes("tok_overflow"));
+
+    expect(targetLine?.y).toBeGreaterThan(doc.pageSettings.marginTop);
+    expect(targetLine?.tokenIds).toEqual(["tok_overflow"]);
   });
 
   it("snaps a dragged token onto a nearby line and preserves annotation anchors", () => {

@@ -11,11 +11,25 @@ import {
   wordBoxRectFromPositioned,
   WORD_BOX_COLLISION_GAP
 } from "./collision.js";
-import { routeLine, sourceLineBoxHeight, TOKEN_GAP } from "./layout.js";
+import { availableBands, routeLine, sourceLineBoxHeight, TOKEN_GAP } from "./layout.js";
 import type { InterlinearDocument, InterlinearLine, Page, Token } from "./schema.js";
 
 export const LINE_SNAP_DISTANCE = 28;
 const COLLISION_CONSTRAINT_EPSILON = 0.001;
+
+export function addPageToDocument(
+  document: InterlinearDocument,
+  pageId: string,
+  afterPageId?: string
+): InterlinearDocument {
+  if (document.pages.some((page) => page.id === pageId)) return document;
+  const requestedIndex = afterPageId ? document.pages.findIndex((page) => page.id === afterPageId) : document.pages.length - 1;
+  const insertIndex = requestedIndex >= 0 ? requestedIndex : document.pages.length - 1;
+  const page = createPage(pageId, insertIndex + 2);
+  const pages = [...document.pages];
+  pages.splice(Math.max(0, insertIndex) + 1, 0, page);
+  return { ...document, pages: renumberPages(pages) };
+}
 
 export function addLineToDocument(
   document: InterlinearDocument,
@@ -439,6 +453,19 @@ function createLineAt(document: InterlinearDocument, y: number): InterlinearLine
   };
 }
 
+function createPage(pageId = createId("page"), number = 1): Page {
+  return {
+    id: pageId,
+    number,
+    lines: [],
+    pageObjects: []
+  };
+}
+
+function renumberPages(pages: Page[]): Page[] {
+  return pages.map((page, index) => ({ ...page, number: index + 1 }));
+}
+
 function constrainLineY(document: InterlinearDocument, y: number): number {
   return clamp(
     y,
@@ -553,48 +580,79 @@ function moveTokenToNextLineIfNeeded(
   const found = findLineById(document, pageId, lineId);
   if (!found || tokenFitsLine(document, found.page, found.line, tokenId)) return document;
 
-  const targetLine = nextLineAfter(document, found.page, found.line);
-  const targetExists = found.page.lines.some((line) => line.id === targetLine.id);
-  const next = {
+  const target = nextLinePlacementAfter(document, found.page, found.line);
+  if (!target) return fallback ?? document;
+
+  const next = moveTokenToLine(document, found.page, found.line, target, tokenId);
+  const spaced = target.lineExists ? next : resolveLineCollisions(next, target.page.id);
+
+  return moveTokenToNextLineIfNeeded(
+    resolveWordBoxCollisions(spaced, target.page.id, target.line.id),
+    target.page.id,
+    target.line.id,
+    tokenId,
+    remainingMoves - 1,
+    fallback
+  );
+}
+
+function moveTokenToLine(
+  document: InterlinearDocument,
+  sourcePage: Page,
+  sourceLine: InterlinearLine,
+  target: LinePlacement,
+  tokenId: string
+): InterlinearDocument {
+  const targetPageExists = document.pages.some((page) => page.id === target.page.id);
+  const sourceAndTargetSamePage = sourcePage.id === target.page.id;
+  const pages = document.pages.map((page) => {
+    if (page.id !== sourcePage.id && page.id !== target.page.id) return page;
+    const baseLines = page.lines.map((line) => {
+      if (line.id === sourceLine.id) {
+        return { ...line, tokenIds: line.tokenIds.filter((id) => id !== tokenId) };
+      }
+      if (line.id === target.line.id) {
+        return { ...line, tokenIds: [...line.tokenIds.filter((id) => id !== tokenId), tokenId] };
+      }
+      return line;
+    });
+    const shouldAddTargetLine = page.id === target.page.id && !target.lineExists;
+    return {
+      ...page,
+      lines: [
+        ...baseLines,
+        ...(shouldAddTargetLine ? [{ ...target.line, tokenIds: [tokenId] }] : [])
+      ].sort((left, right) => left.y - right.y)
+    };
+  });
+
+  const insertedPages = targetPageExists
+    ? pages
+    : insertPageAfter(
+        pages,
+        target.afterPageId ?? (sourceAndTargetSamePage ? target.page.id : sourcePage.id),
+        { ...target.page, lines: [{ ...target.line, tokenIds: [tokenId] }] }
+      );
+
+  return {
     ...document,
     tokens: {
       ...document.tokens,
       [tokenId]: {
         ...document.tokens[tokenId],
-        lineId: targetLine.id,
+        lineId: target.line.id,
         offset: { x: 0, y: 0 }
       }
     },
-    pages: document.pages.map((page) =>
-      page.id === found.page.id
-        ? {
-            ...page,
-            lines: [
-              ...page.lines.map((line) => {
-                if (line.id === found.line.id) {
-                  return { ...line, tokenIds: line.tokenIds.filter((id) => id !== tokenId) };
-                }
-                if (line.id === targetLine.id) {
-                  return { ...line, tokenIds: [...line.tokenIds.filter((id) => id !== tokenId), tokenId] };
-                }
-                return line;
-              }),
-              ...(targetExists ? [] : [{ ...targetLine, tokenIds: [tokenId] }])
-            ].sort((left, right) => left.y - right.y)
-          }
-        : page
-      )
+    pages: renumberPages(insertedPages)
   };
-  const spaced = targetExists ? next : resolveLineCollisions(next, found.page.id);
+}
 
-  return moveTokenToNextLineIfNeeded(
-    resolveWordBoxCollisions(spaced, found.page.id, targetLine.id),
-    found.page.id,
-    targetLine.id,
-    tokenId,
-    remainingMoves - 1,
-    fallback
-  );
+function insertPageAfter(pages: Page[], afterPageId: string, page: Page): Page[] {
+  const insertIndex = pages.findIndex((candidate) => candidate.id === afterPageId);
+  const next = [...pages];
+  next.splice(insertIndex >= 0 ? insertIndex + 1 : next.length, 0, page);
+  return next;
 }
 
 function tokenFitsLine(document: InterlinearDocument, page: Page, line: InterlinearLine, tokenId: string): boolean {
@@ -605,15 +663,82 @@ function tokenFitsLine(document: InterlinearDocument, page: Page, line: Interlin
   return routed.bands.some((band) => rect.x >= band.x && rect.x + rect.width <= band.x + band.width);
 }
 
-function nextLineAfter(document: InterlinearDocument, page: Page, line: InterlinearLine): InterlinearLine {
+type LinePlacement = {
+  page: Page;
+  line: InterlinearLine;
+  lineExists: boolean;
+  afterPageId?: string;
+};
+
+function nextLinePlacementAfter(document: InterlinearDocument, page: Page, line: InterlinearLine): LinePlacement | null {
   const lineY = line.y + line.offset.y;
   const targetY = lineY + lineAdvance(document);
+  const samePagePlacement = linePlacementOnPage(document, page, targetY, line.id);
+  if (samePagePlacement) return samePagePlacement;
+
+  const pageIndex = document.pages.findIndex((candidate) => candidate.id === page.id);
+  for (const candidate of document.pages.slice(pageIndex + 1)) {
+    const placement = firstLinePlacementOnPage(document, candidate);
+    if (placement) return placement;
+  }
+
+  const nextPage = createPage(createId("page"), document.pages.length + 1);
+  const y = firstAvailableLineY(document, nextPage, document.pageSettings.marginTop);
+  return y === null
+    ? null
+    : {
+        page: nextPage,
+        line: createLineAt(document, y),
+        lineExists: false,
+        afterPageId: document.pages.at(-1)?.id ?? page.id
+      };
+}
+
+function linePlacementOnPage(
+  document: InterlinearDocument,
+  page: Page,
+  targetY: number,
+  excludedLineId?: string
+): LinePlacement | null {
+  if (!lineFitsPage(document, targetY)) return null;
   const existing = nearestLine(
-    page.lines.filter((candidate) => candidate.id !== line.id && candidate.y + candidate.offset.y > lineY),
+    page.lines.filter((candidate) => candidate.id !== excludedLineId && candidate.y + candidate.offset.y >= targetY - LINE_SNAP_DISTANCE),
     targetY,
     LINE_SNAP_DISTANCE
   );
-  return existing ?? createLineAt(document, targetY);
+  if (existing) return { page, line: existing, lineExists: true };
+  const y = firstAvailableLineY(document, page, targetY);
+  return y !== null && lineFitsPage(document, y) ? { page, line: createLineAt(document, y), lineExists: false } : null;
+}
+
+function firstLinePlacementOnPage(document: InterlinearDocument, page: Page): LinePlacement | null {
+  const sortedLines = [...page.lines].sort((left, right) => left.y + left.offset.y - (right.y + right.offset.y));
+  const targetY = sortedLines.length
+    ? sortedLines[sortedLines.length - 1].y + sortedLines[sortedLines.length - 1].offset.y + lineAdvance(document)
+    : document.pageSettings.marginTop;
+  return linePlacementOnPage(document, page, targetY);
+}
+
+function firstAvailableLineY(document: InterlinearDocument, page: Page, startY: number): number | null {
+  const minimumY = document.pageSettings.marginTop;
+  const maximumY = maximumLineY(document);
+  const lineHeight = document.pageSettings.fontSize + document.pageSettings.annotationGap * Math.max(document.layers.length, 1);
+  const step = Math.max(1, Math.floor(sourceLineBoxHeight(document.pageSettings) / 2));
+  const firstY = clamp(startY, minimumY, maximumY);
+
+  for (let y = firstY; y <= maximumY; y += step) {
+    if (availableBands(page, document.pageSettings, y, lineHeight).length > 0) return y;
+  }
+
+  return null;
+}
+
+function lineFitsPage(document: InterlinearDocument, y: number): boolean {
+  return y >= document.pageSettings.marginTop && y <= maximumLineY(document);
+}
+
+function maximumLineY(document: InterlinearDocument): number {
+  return document.pageSettings.height - document.pageSettings.marginBottom - sourceLineBoxHeight(document.pageSettings);
 }
 
 function findLineById(

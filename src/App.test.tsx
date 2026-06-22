@@ -2,7 +2,9 @@ import { fireEvent, render as rtlRender, screen, waitFor } from "@testing-librar
 import type { ComponentProps, ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import { createSampleDocument } from "./shared/documentFactory";
+import { createEmptyDocument, createSampleDocument } from "./shared/documentFactory";
+import { sourceLineBoxHeight } from "./shared/layout";
+import type { InterlinearDocument } from "./shared/schema";
 
 function render(element: ReactElement) {
   if (element.type === App) {
@@ -170,6 +172,39 @@ describe("App editor", () => {
 
     expect(screen.getByRole("button", { name: "Undo" })).not.toBeDisabled();
     expect(screen.getByRole("button", { name: "Redo" })).toBeDisabled();
+  });
+
+  it("creates a new page manually and supports undo and redo", () => {
+    const { container } = render(<App />);
+
+    expect(container.querySelectorAll("[data-page-id]")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add page" }));
+
+    expect(screen.getByText("Created page.")).toBeInTheDocument();
+    expect(container.querySelectorAll("[data-page-id]")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Undo" })).not.toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect(container.querySelectorAll("[data-page-id]")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Redo" }));
+    expect(container.querySelectorAll("[data-page-id]")).toHaveLength(2);
+  });
+
+  it("keeps typing focus when a new word overflows to the next page", async () => {
+    const { container } = rtlRender(<App initialDocument={createBottomOverflowDocument()} />);
+    const input = screen.getByLabelText<HTMLInputElement>("Word box seed");
+
+    fireEvent.doubleClick(input.closest(".word-box") as HTMLElement);
+    await waitFor(() => expect(input).not.toHaveAttribute("readonly"));
+
+    fireEvent.keyDown(input, { key: " " });
+
+    await waitFor(() => expect(container.querySelectorAll("[data-page-id]")).toHaveLength(2));
+    const nextInput = screen.getByLabelText<HTMLInputElement>("Word box empty");
+    await waitFor(() => expect(document.activeElement).toBe(nextInput));
+    expect(nextInput.closest<HTMLElement>("[data-page-id]")?.getAttribute("aria-label")).toBe("Page 2");
   });
 
   it("undoes and redoes token edits from controls", () => {
@@ -1602,4 +1637,59 @@ function findOverlappingWordBoxes(container: HTMLElement): string[] {
     }
   }
   return overlaps;
+}
+
+function createBottomOverflowDocument(): InterlinearDocument {
+  const doc = createEmptyDocument();
+  const page = doc.pages[0];
+  const lineId = "line_bottom";
+  const tokenId = "tok_seed";
+  const maxLineY = doc.pageSettings.height - doc.pageSettings.marginBottom - sourceLineBoxHeight(doc.pageSettings);
+  const contentWidth = doc.pageSettings.width - doc.pageSettings.marginLeft - doc.pageSettings.marginRight;
+
+  return {
+    ...doc,
+    tokens: {
+      [tokenId]: {
+        id: tokenId,
+        text: "seed",
+        normalized: "seed",
+        direction: "ltr",
+        lineId,
+        offset: { x: 0, y: 0 },
+        textMetrics: {}
+      }
+    },
+    pages: [
+      {
+        ...page,
+        lines: [
+          {
+            id: lineId,
+            tokenIds: [tokenId],
+            y: maxLineY,
+            offset: { x: 0, y: 0 },
+            direction: "ltr"
+          }
+        ],
+        pageObjects: [
+          {
+            id: "full_width_obstacle",
+            kind: "textBlock",
+            rect: {
+              x: doc.pageSettings.marginLeft,
+              y: maxLineY - 4,
+              width: contentWidth,
+              height: sourceLineBoxHeight(doc.pageSettings) + 8
+            },
+            wrapMode: "rectangular",
+            zIndex: 1,
+            content: "",
+            caption: "",
+            metadata: {}
+          }
+        ]
+      }
+    ]
+  };
 }
