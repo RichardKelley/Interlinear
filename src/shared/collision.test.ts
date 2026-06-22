@@ -87,7 +87,7 @@ describe("word-box collision geometry", () => {
 
     expect(rect.width).toBe(estimateTokenWidth(text, fontSize) + ANNOTATION_BOX_WIDTH_PADDING);
     expect(rect.width).toBeLessThan(sourceRect.width);
-    expect(rect.width).toBeGreaterThan(estimateTokenWidth(text, fontSize) + 4);
+    expect(rect.width).toBeGreaterThan(estimateTokenWidth(text, fontSize));
   });
 
   it("detects overlap with configurable spacing", () => {

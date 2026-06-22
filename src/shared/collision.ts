@@ -3,7 +3,7 @@ import type { AnnotationCell, InterlinearDocument, InterlinearLine, Layer, Page,
 
 export const WORD_BOX_MIN_WIDTH = 22;
 export const WORD_BOX_EMPTY_MIN_WIDTH = 34;
-export const WORD_BOX_WIDTH_PADDING = 12;
+export const WORD_BOX_WIDTH_PADDING = 6;
 export const ANNOTATION_BOX_WIDTH_PADDING = WORD_BOX_WIDTH_PADDING;
 export const WORD_BOX_COLLISION_GAP = 1;
 export const ANNOTATION_CONNECTOR_LENGTH = 11;

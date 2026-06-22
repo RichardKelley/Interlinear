@@ -645,7 +645,7 @@ textarea {
   border-color: rgba(181, 171, 154, 0.45);
   display: flex;
   justify-content: center;
-  padding: 0 3px;
+  padding: 0 2px;
 }
 
 .page.guides-hidden .word-box,
